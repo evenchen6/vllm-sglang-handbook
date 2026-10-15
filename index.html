@@ -1,0 +1,1427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>从 Transformer 到 vLLM / SGLang · 学习手册</title>
+<meta name="description" content="面向推荐架构后台工程师：从 Transformer 到 Hugging Face Transformers，再到 vLLM 与 SGLang 的交互式学习页。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
+<style>
+
+  :root {
+    --bg: #f3ecdf;
+    --paper: #fffaf3;
+    --ink: #1c1915;
+    --muted: #5e574c;
+    --line: #e3d5c2;
+    --spine: #17211e;
+    --spine-2: #24312c;
+    --copper: #b5522a;
+    --copper-soft: #f6e3d8;
+    --teal: #0f6e62;
+    --teal-soft: #d7eee9;
+    --gold: #8d6b2f;
+    --gold-soft: #f3e7cf;
+    --navy: #243044;
+    --code: #1b242c;
+    --shadow: 0 16px 40px rgba(48, 32, 14, 0.08);
+    --serif: "Noto Serif SC", "Songti SC", "STSong", "PMingLiU", serif;
+    --sans: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 500px at 10% -10%, #f8e7d4 0%, transparent 55%),
+      linear-gradient(180deg, #f7f1e6 0%, var(--bg) 220px);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.75;
+  }
+  a { color: var(--teal); }
+  a:hover { color: var(--copper); }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
+  .progress {
+    position: fixed; inset: 0 0 auto 0; height: 4px; z-index: 20;
+    background: transparent;
+  }
+  .progress > span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--copper), var(--teal)); }
+  .shell { display: grid; grid-template-columns: 272px minmax(0, 1fr); min-height: 100vh; }
+  .nav {
+    position: sticky; top: 0; height: 100vh; overflow: auto;
+    background: var(--spine); color: #efe7da; padding: 22px 16px 32px;
+  }
+  .brand { padding: 4px 10px 16px; border-bottom: 1px solid rgba(255,255,255,.08); margin-bottom: 12px; }
+  .brand strong { display: block; font-family: var(--serif); font-size: 20px; font-weight: 700; letter-spacing: .02em; }
+  .brand span { display: block; color: #c9bfb0; font-size: 12px; line-height: 1.5; margin-top: 4px; }
+  .nav-actions { display: flex; gap: 8px; padding: 0 8px 12px; }
+  .nav button, .ghost {
+    background: transparent; border: 1px solid rgba(255,255,255,.18); color: #efe7da;
+    border-radius: 999px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+  }
+  .nav a {
+    display: grid; grid-template-columns: 28px 1fr; gap: 6px; align-items: baseline;
+    color: #ddd4c6; text-decoration: none; padding: 6px 10px; border-radius: 8px; font-size: 14px;
+  }
+  .nav a small { color: #9d9486; font-variant-numeric: tabular-nums; }
+  .nav a.active, .nav a:hover { background: var(--spine-2); color: white; }
+  .nav a.core small { color: #e7b59a; }
+  body.core-only .nav a:not(.core) { display: none; }
+  .menu-btn { display: none; }
+  main { padding: 28px 6vw 80px; max-width: 1080px; }
+  .hero { display: grid; grid-template-columns: 1.15fr .85fr; gap: 28px; align-items: stretch; margin-bottom: 28px; }
+  h1 { font-family: var(--serif); font-size: clamp(36px, 5vw, 58px); line-height: 1.18; margin: 0 0 12px; font-weight: 700; }
+  .lede { font-size: 18px; color: var(--muted); margin: 0 0 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+  .meta li, .tag {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 999px;
+    padding: 3px 10px; font-size: 12px; color: var(--muted);
+  }
+  .layers { background: var(--paper); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 16px; }
+  .layer-card { border-radius: 12px; padding: 12px 14px; margin: 0; }
+  .layer-card + .arrow { text-align: center; color: var(--gold); font-size: 12px; letter-spacing: .12em; margin: 4px 0; }
+  .layer-card b { display: block; font-family: var(--serif); font-size: 18px; }
+  .layer-card span { color: var(--muted); font-size: 14px; }
+  .l1 { background: var(--copper-soft); }
+  .l2 { background: var(--gold-soft); }
+  .l3 { background: var(--teal-soft); }
+  section.chapter {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 20px;
+    padding: 26px 26px 22px; margin: 18px 0; box-shadow: var(--shadow);
+  }
+  body.core-only section.chapter:not([data-core="1"]) { display: none; }
+  .ch-h { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: start; margin-bottom: 8px; }
+  .num { font-family: var(--serif); font-size: 28px; color: var(--copper); line-height: 1; }
+  h2 { font-family: var(--serif); font-size: 30px; line-height: 1.25; margin: 0; }
+  h3 { font-family: var(--serif); font-size: 22px; margin: 22px 0 8px; }
+  .eyebrow { margin: 0; color: var(--gold); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
+  .got { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+  p { margin: 10px 0; }
+  .cite { font-size: 12px; text-decoration: none; border-bottom: 1px dashed var(--teal); }
+  .callout { border-radius: 14px; padding: 12px 14px; margin: 14px 0; background: var(--gold-soft); }
+  .callout.warn { background: #fde8df; }
+  .callout.ok { background: var(--teal-soft); }
+  .callout strong { font-family: var(--serif); }
+  .quote { margin: 14px 0; padding: 8px 0 8px 14px; border-left: 3px solid var(--copper); color: var(--muted); font-size: 15px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .card, .mini {
+    border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; background: #fffdf9;
+  }
+  .card h3, .mini h3 { margin-top: 0; }
+  .card.active { border-color: var(--teal); box-shadow: inset 0 0 0 1px var(--teal); }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; margin: 12px 0; }
+  th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 8px 8px; vertical-align: top; }
+  th { font-size: 13px; color: var(--muted); font-weight: 500; }
+  pre {
+    background: var(--code); color: #e7eef2; border-radius: 14px; padding: 14px 14px 16px;
+    overflow: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; position: relative;
+  }
+  code { font-family: var(--mono); font-size: .92em; }
+  p code, li code, td code { background: #f3e7d6; padding: 1px 5px; border-radius: 5px; }
+  .copy {
+    position: absolute; top: 8px; right: 8px; border: 0; background: #31414c; color: #efe7da;
+    border-radius: 8px; padding: 4px 8px; cursor: pointer; font-size: 12px;
+  }
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .tabs button, .row button, .stepper button {
+    border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 6px 12px; cursor: pointer;
+  }
+  .tabs button[aria-pressed="true"], .row button[aria-pressed="true"] {
+    background: var(--ink); color: #fffaf3; border-color: var(--ink);
+  }
+  .lab { border: 1px dashed #d9c8b0; border-radius: 16px; padding: 14px; margin: 14px 0; background: #fffdf8; }
+  .lab-h { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .stack { display: grid; gap: 8px; }
+  .blk {
+    border-radius: 12px; padding: 10px 12px; background: #f6f0e6; border: 1px solid var(--line);
+  }
+  .blk b { display: block; }
+  .blk em { font-style: normal; color: var(--muted); font-size: 14px; }
+  .blk.show-attn { background: var(--copper-soft); border-color: #e7c2b2; }
+  .blk.show-cross { background: var(--gold-soft); }
+  .blk.show-ffn { background: var(--teal-soft); border-color: #b7ddd6; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .mask { display: grid; grid-template-columns: repeat(4, 28px); gap: 4px; margin-top: 8px; }
+  .mask i { width: 28px; height: 28px; border-radius: 4px; background: #efe4d4; display: block; }
+  .mask i.on { background: var(--copper); }
+  .mask i.mid { background: var(--teal); }
+  .tokens { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tok {
+    border: 1px solid var(--line); background: white; border-radius: 10px; padding: 6px 10px; cursor: pointer;
+  }
+  .tok[aria-pressed="true"] { background: var(--copper); color: white; border-color: var(--copper); }
+  .bars { display: grid; gap: 6px; margin-top: 8px; }
+  .bar { display: grid; grid-template-columns: 52px 1fr 52px; gap: 8px; align-items: center; font-size: 13px; }
+  .bar span.track { height: 10px; background: #efe4d4; border-radius: 99px; overflow: hidden; }
+  .bar span.track i { display: block; height: 100%; background: var(--teal); width: 0; }
+  .kv { display: flex; gap: 8px; flex-wrap: wrap; }
+  .kv article { width: 92px; border: 1px solid var(--line); border-radius: 12px; padding: 8px; background: white; }
+  .kv article b { display: block; text-align: center; }
+  .slot { height: 18px; border-radius: 5px; margin-top: 6px; background: #efe4d4; font-size: 11px; text-align: center; line-height: 18px; }
+  .slot.filled { background: var(--teal); color: white; }
+  .mem { display: grid; grid-template-columns: repeat(16, 1fr); gap: 4px; margin: 8px 0; }
+  .mem i {
+    aspect-ratio: 1; border-radius: 5px; display: grid; place-items: center; font-size: 11px;
+    background: #f3eadc; border: 1px dashed #d9cbb8; font-style: normal;
+  }
+  .mem i[data-k="A"] { background: #f0c7b6; border-style: solid; }
+  .mem i[data-k="B"] { background: #b7ddd4; border-style: solid; }
+  .mem i[data-k="C"] { background: #ead7a4; border-style: solid; }
+  .mem i[data-k="D"] { background: #243044; color: white; border-style: solid; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin: 8px 0; }
+  label.field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  input[type="number"], input[type="search"], select {
+    border: 1px solid var(--line); background: white; border-radius: 8px; padding: 6px 8px; min-width: 0;
+  }
+  input[type="search"] { width: min(320px, 100%); }
+  .result { font-variant-numeric: tabular-nums; background: var(--navy); color: #f4efe6; border-radius: 12px; padding: 10px 12px; }
+  .q { border-top: 1px solid var(--line); padding: 12px 0; }
+  .q button.opt { display: block; width: 100%; text-align: left; margin: 6px 0; border-radius: 10px; border: 1px solid var(--line); background: white; padding: 8px 10px; cursor: pointer; }
+  .q button.opt.good { border-color: var(--teal); background: var(--teal-soft); }
+  .q button.opt.bad { border-color: var(--copper); background: var(--copper-soft); }
+  .explain { font-size: 14px; color: var(--muted); }
+  .glossary article { border-bottom: 1px solid var(--line); padding: 8px 0; }
+  .glossary dt { font-weight: 700; }
+  .glossary dd { margin: 2px 0 0; color: var(--muted); }
+  footer { color: var(--muted); font-size: 14px; margin-top: 18px; }
+  .hidden { display: none !important; }
+  @media (max-width: 980px) {
+    html { scroll-padding-top: 52px; }
+    .shell { display: flex; flex-direction: column; }
+    .nav { position: fixed; z-index: 30; transform: translateX(-105%); width: min(320px, 88vw); transition: transform .2s ease; }
+    .nav.open { transform: none; }
+    .menu-btn {
+      display: flex; position: sticky; top: 0; z-index: 31; order: -1;
+      width: 100%; border: 0; border-radius: 0; background: var(--spine); color: white;
+      padding: 12px 16px; align-items: center;
+    }
+    .hero, .grid-2, .grid-3, .cols, .ch-h { grid-template-columns: 1fr; }
+    main { padding: 12px 16px 36px; min-width: 0; }
+    h1 { font-size: 34px; }
+    .got { white-space: normal; }
+    section.chapter, .layers, .hero { max-width: 100%; overflow-x: auto; }
+    .mem { grid-template-columns: repeat(16, minmax(0, 1fr)); }
+    pre { max-width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .nav { transition: none; }
+  }
+  @media print {
+    .nav, .menu-btn, .progress, .got, .copy, .tabs, .stepper { display: none !important; }
+    .shell { display: block; }
+    section.chapter { break-inside: avoid; box-shadow: none; }
+    body.core-only section.chapter:not([data-core="1"]) { display: block; }
+  }
+
+  .l4 { background: #e8e4f5; }
+  .nav-group { color: #9d9486; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; padding: 10px 10px 4px; }
+  .scoreline { font-variant-numeric: tabular-nums; }
+  .radix { display: flex; flex-direction: column; gap: 6px; font-family: var(--mono); font-size: 12px; }
+  .radix .node { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: white; margin-left: calc(var(--d, 0) * 14px); }
+  .radix .node.hit { background: var(--teal-soft); border-color: var(--teal); }
+
+</style>
+</head>
+<body>
+<div class="progress" aria-hidden="true"><span id="bar"></span></div>
+<div class="shell">
+  <nav class="nav" id="nav" aria-label="章节">
+    <div class="brand">
+      <strong>Transformer → 推理引擎</strong>
+      <span>推荐后台 · vLLM / SGLang · 2026-10-15</span>
+    </div>
+    <div class="nav-actions">
+      <button type="button" id="core-toggle" aria-pressed="false">只看主线</button>
+      <button type="button" id="reset-got">清空标记</button>
+    </div>
+    <div class="nav-group">地图与基础</div>
+    <a class="core" href="#map"><small>00</small>学习地图</a>
+    <a class="core" href="#audience"><small>01</small>读者定位</a>
+    <a class="core" href="#names"><small>02</small>命名澄清</a>
+    <a class="core" href="#recmap"><small>03</small>推荐对照</a>
+    <a class="core" href="#arch"><small>04</small>模型块</a>
+    <a class="core" href="#attn"><small>05</small>注意力</a>
+    <a href="#families"><small>06</small>三种家族</a>
+    <a class="core" href="#kv"><small>07</small>KV cache</a>
+    <a class="core" href="#prefill"><small>08</small>Prefill / Decode</a>
+    <div class="nav-group">HF 与为何要引擎</div>
+    <a class="core" href="#hf"><small>09</small>Transformers 库</a>
+    <a href="#infer"><small>10</small>第一次推理</a>
+    <a href="#train"><small>11</small>微调 Trainer</a>
+    <a class="core" href="#serve-why"><small>12</small>为何要推理引擎</a>
+    <div class="nav-group">vLLM</div>
+    <a class="core" href="#page"><small>13</small>PagedAttention</a>
+    <a class="core" href="#batch"><small>14</small>连续批处理</a>
+    <a href="#more"><small>15</small>更多机制</a>
+    <a class="core" href="#proc"><small>16</small>进程与用法</a>
+    <a class="core" href="#vllm-run"><small>17</small>启动与旋钮</a>
+    <div class="nav-group">SGLang</div>
+    <a class="core" href="#sglang"><small>18</small>SGLang / Radix</a>
+    <a class="core" href="#sglang-run"><small>19</small>启动与前缀实验</a>
+    <a class="core" href="#choose"><small>20</small>怎么选</a>
+    <div class="nav-group">落地</div>
+    <a class="core" href="#gateway"><small>21</small>网关与监控</a>
+    <a class="core" href="#path"><small>22</small>学习路线</a>
+    <a class="core" href="#quiz"><small>23</small>自测</a>
+    <a href="#faq"><small>24</small>FAQ</a>
+    <a href="#glossary"><small>25</small>术语</a>
+    <a href="#sources"><small>26</small>来源</a>
+  </nav>
+  <button class="menu-btn" type="button" id="menu-btn" aria-expanded="false">目录</button>
+  <main>
+
+    <header class="hero" id="map">
+      <div>
+        <p class="eyebrow">学习手册</p>
+        <h1>从 Transformer 到 vLLM / SGLang</h1>
+        <p class="lede">先看清模型怎么算，再看 Hugging Face Transformers 怎么加载权重，最后看 vLLM 与 SGLang 怎么把同一份权重做成高吞吐推理服务——并对照推荐后台熟悉的 QPS、缓存与批处理语言。</p>
+        <ul class="meta">
+          <li>文档核对日期 2026-10-15</li>
+          <li>读者：推荐架构后台</li>
+          <li>主线含 vLLM + SGLang 核心</li>
+          <li>不编造未核实 benchmark</li>
+        </ul>
+        <p>接口与默认值随版本变化。每节末尾链到官方页；落地前请再看一次文档顶部版本。口语里的「slang」在本文一律写作 <strong>SGLang</strong>。</p>
+      </div>
+      <div class="layers" aria-label="四层关系">
+        <div class="layer-card l1"><b>Transformer 结构</b><span>2017 年注意力模型。Llama、Qwen、BERT、T5 都从这里长出来。</span></div>
+        <p class="arrow">被定义、训练、保存</p>
+        <div class="layer-card l2"><b>transformers 库</b><span>Hugging Face 模型定义框架：config、权重、tokenizer、Pipeline / Trainer。</span></div>
+        <p class="arrow">读取 config / tokenizer / 权重</p>
+        <div class="layer-card l3"><b>vLLM · SGLang</b><span>推理服务引擎：分页 KV、连续批处理、前缀复用、OpenAI 兼容 API。</span></div>
+        <p class="arrow">接到推荐在线体系</p>
+        <div class="layer-card l4"><b>网关 · 监控 · 选型</b><span>超时限流、TTFT/TPOT、与排序服务同一套运维语言。</span></div>
+      </div>
+    </header>
+
+    <section class="chapter" id="audience" data-core="1">
+      <header class="ch-h">
+        <span class="num">01</span>
+        <div>
+          <p class="eyebrow">定位</p>
+          <h2>给推荐架构后台工程师</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="audience"> 这节能复述</label>
+      </header>
+      <p><strong>你是谁：</strong>召回 / 排序 / 特征 / 服务化背景。已经熟悉 QPS、p99、缓存、批处理与在线架构，想系统进入 LLM 推理侧，而不是从 NLP 零基础重学。</p>
+      <div class="grid-2">
+        <article class="card">
+          <h3>学完能做什么</h3>
+          <ul>
+            <li>解释 prefill / decode 与 KV cache</li>
+            <li>单机拉起 vLLM 或 SGLang 的 OpenAI 兼容接口</li>
+            <li>用推荐同学熟悉的指标语言压测与选型</li>
+            <li>把推理服务接到现有网关与监控</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>阅读约定</h3>
+          <p>安装命令、默认端口、配置项以各项目官方文档为准。文中命令级示例来自 2026-10-15 前后核实过的页面。不编造未核实的吞吐数字；公开对比只给链接与定性结论。</p>
+        </article>
+      </div>
+      <div class="callout ok"><strong>关于 slang：</strong>业界口语里说的 slang，通常指 <strong>SGLang</strong>（Structured Generation Language），常与 vLLM 一起对比的推理引擎。下文一律写 SGLang。</div>
+    </section>
+
+    <section class="chapter" id="names" data-core="1">
+      <header class="ch-h">
+        <span class="num">02</span>
+        <div>
+          <p class="eyebrow">命名</p>
+          <h2>四个词指的是四件事</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="names"> 这节能复述</label>
+      </header>
+      <p>口语里的 transformer / transformers / vLLM / SGLang 经常被揉成一件事。学习时拆开，代码才对得上。</p>
+      <div class="grid-2">
+        <article class="card">
+          <h3>Transformer</h3>
+          <p>一种神经网络结构。核心是注意力层。原始论文：Vaswani 等人 2017 年 <a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a>。</p>
+        </article>
+        <article class="card">
+          <h3>Transformers（库）</h3>
+          <p>Python 库，仓库 <a href="https://github.com/huggingface/transformers">huggingface/transformers</a>。模型定义框架：配置、模型类、预处理器，加上 Pipeline 与 Trainer。</p>
+        </article>
+        <article class="card">
+          <h3>vLLM</h3>
+          <p>推理与服务引擎，仓库 <a href="https://github.com/vllm-project/vllm">vllm-project/vllm</a>。起源于 UC Berkeley；以 PagedAttention、连续批处理与 OpenAI 兼容服务闻名。<a class="cite" href="https://docs.vllm.ai/">docs.vllm.ai</a></p>
+        </article>
+        <article class="card">
+          <h3>SGLang</h3>
+          <p>高性能 serving 框架，仓库 <a href="https://github.com/sgl-project/sglang">sgl-project/sglang</a>。以 RadixAttention 前缀复用与结构化生成前端闻名。<a class="cite" href="https://docs.sglang.ai/">docs.sglang.ai</a> / <a class="cite" href="https://docs.sglang.io/">docs.sglang.io</a></p>
+        </article>
+      </div>
+      <div class="callout"><strong>和 checkpoint 的差别：</strong>架构是层的定义，checkpoint 是训练好的权重。「模型」两者都可能指。BERT 是架构，<code>bert-base-cased</code> 是一组权重。<code>config.json</code> 描述架构超参，权重文件才是 checkpoint。</div>
+    </section>
+
+    <section class="chapter" id="recmap" data-core="1">
+      <header class="ch-h">
+        <span class="num">03</span>
+        <div>
+          <p class="eyebrow">迁移</p>
+          <h2>推荐后台 ↔ 推理概念对照</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="recmap"> 这节能复述</label>
+      </header>
+      <p>把推理引擎想成「会说话的排序服务」：输入是 token 序列，输出是逐 token 生成；瓶颈常常在<strong>显存与调度</strong>，而不只是算力够不够。</p>
+      <table>
+        <thead><tr><th>推荐后台熟悉的概念</th><th>LLM 推理中的对应</th><th>备注</th></tr></thead>
+        <tbody>
+          <tr><td>QPS / 吞吐</td><td>throughput（req/s 或 tok/s）</td><td>更常看 token/s；长输出时 req/s 会掉</td></tr>
+          <tr><td>p99 端到端延迟</td><td>拆成 TTFT + 后续 token 延迟</td><td>「多久开始吐字」与「吐字顺不顺」</td></tr>
+          <tr><td>批处理（mini-batch）</td><td>continuous batching</td><td>请求可中途加入、完成即离开</td></tr>
+          <tr><td>特征缓存 / Embedding 缓存</td><td>KV cache；prefix / radix 缓存</td><td>KV 在 GPU 上随序列与并发增长</td></tr>
+          <tr><td>分片 / 副本</td><td>TP / PP / DP / EP</td><td>TP 切权重；DP 像多副本抬吞吐</td></tr>
+          <tr><td>限流 / 熔断 / 排队</td><td>max_num_seqs、队列、503、preemption</td><td>显存不够会抢占重算</td></tr>
+          <tr><td>多租户 / 路由</td><td>模型路由、LoRA、served-model-name</td><td>网关 AB / 金丝雀与推荐一致</td></tr>
+          <tr><td>冷启动</td><td>权重加载、CUDA graph / compile</td><td>首次与重启后 TTFT 差一截</td></tr>
+          <tr><td>特征维 / 序列长度</td><td>context length（max model len）</td><td>超长上下文直接吃显存并抬 TTFT</td></tr>
+        </tbody>
+      </table>
+      <div class="callout ok"><strong>一句话心智模型：</strong>推荐打分多为固定计算图；LLM decode 是自回归循环，历史 KV 常驻显存。并发越高、上下文越长，越容易撞显存墙。</div>
+    </section>
+
+    <section class="chapter" id="arch" data-core="1">
+      <header class="ch-h">
+        <span class="num">04</span>
+        <div>
+          <p class="eyebrow">结构</p>
+          <h2>一块 Transformer 里有什么</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="arch"> 这节能复述</label>
+      </header>
+      <p>原论文堆叠编码器与解码器块。今天的解码器-only LLM（GPT、Llama、Qwen）主要是「自注意力 + 前馈」反复堆叠，外加嵌入与输出头。</p>
+      <div class="tabs" id="arch-view" role="tablist">
+        <button type="button" aria-pressed="true" data-view="all">整块</button>
+        <button type="button" aria-pressed="false" data-view="attn">只看注意力</button>
+        <button type="button" aria-pressed="false" data-view="ffn">只看前馈</button>
+        <button type="button" aria-pressed="false" data-view="cross">编解码交叉</button>
+      </div>
+      <div class="lab" id="arch-lab">
+        <div class="stack" id="arch-stack">
+          <div class="blk" data-part="embed"><b>Token / Position Embedding</b><em>把离散 token 变成向量</em></div>
+          <div class="blk show-attn" data-part="attn"><b>Multi-Head Self-Attention</b><em>让每个位置从序列里取信息</em></div>
+          <div class="blk show-cross" data-part="cross"><b>Cross-Attention（编解码器才有）</b><em>解码器读编码器的记忆</em></div>
+          <div class="blk show-ffn" data-part="ffn"><b>Feed-Forward Network</b><em>逐位置非线性变换</em></div>
+          <div class="blk" data-part="norm"><b>残差 + LayerNorm / RMSNorm</b><em>稳定训练与推理数值</em></div>
+          <div class="blk" data-part="head"><b>LM Head</b><em>投影到词表，采下一个 token</em></div>
+        </div>
+        <p class="explain" id="arch-note">点上面的按钮，高亮当前要盯的子模块。</p>
+      </div>
+      <p>推理时「一次前向」就是：读已有 KV（若有）→ 算注意力与 FFN → 写出新 KV → 得到下一个 token 的分布。引擎要优化的，正是成千上万次这样的前向如何共享 GPU。</p>
+    </section>
+
+    <section class="chapter" id="attn" data-core="1">
+      <header class="ch-h">
+        <span class="num">05</span>
+        <div>
+          <p class="eyebrow">计算</p>
+          <h2>缩放点积注意力</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="attn"> 这节能复述</label>
+      </header>
+      <p>注意力让每个位置从其他位置收集信息。查询 Q、键 K、值 V 由输入线性投影得到。输出是值向量的加权和，权重来自查询与键的相似度。</p>
+      <div class="result" aria-label="注意力公式">Attention(Q, K, V) = softmax(QKᵀ / √dₖ) V</div>
+      <p>除以 √dₖ 防止维度变大时点积过陡。多头注意力把计算做 h 次再拼接投影。<a class="cite" href="https://arxiv.org/abs/1706.03762">Vaswani et al., 2017</a></p>
+      <div class="lab" id="attn-lab">
+        <div class="lab-h">
+          <strong>手算实验室 · 序列长度 4 · dₖ=2（示意）</strong>
+          <div class="stepper">
+            <button type="button" id="attn-prev">上一步</button>
+            <button type="button" id="attn-next">下一步</button>
+          </div>
+        </div>
+        <p id="attn-step-label" class="explain">步骤 1 / 5：选中查询位置</p>
+        <div class="tokens" id="attn-tokens" role="group" aria-label="选择查询位置"></div>
+        <div class="cols">
+          <div>
+            <h3>注意力权重（示意）</h3>
+            <div class="mask" id="attn-mask" aria-hidden="true"></div>
+          </div>
+          <div>
+            <h3>本步说明</h3>
+            <p id="attn-explain" class="explain"></p>
+          </div>
+        </div>
+      </div>
+      <div class="callout"><strong>因果掩码：</strong>解码器-only 生成时，位置 i 只能看见 ≤ i 的 key。这就是「从左到右吐字」的数学来源。</div>
+    </section>
+
+    <section class="chapter" id="families">
+      <header class="ch-h">
+        <span class="num">06</span>
+        <div>
+          <p class="eyebrow">家族</p>
+          <h2>编码器 / 解码器 / 编解码器</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="families"> 这节能复述</label>
+      </header>
+      <div class="grid-3">
+        <article class="card"><h3>Encoder-only</h3><p>BERT 一类。双向注意力，擅长理解与分类。推理引擎主战场通常不是它。</p></article>
+        <article class="card"><h3>Decoder-only</h3><p>GPT / Llama / Qwen。因果自注意力，自回归生成。vLLM / SGLang 的主战场。</p></article>
+        <article class="card"><h3>Encoder–Decoder</h3><p>T5 / BART。编码器读输入，解码器带交叉注意力生成。服务形态更复杂一些。</p></article>
+      </div>
+    </section>
+
+    <section class="chapter" id="kv" data-core="1">
+      <header class="ch-h">
+        <span class="num">07</span>
+        <div>
+          <p class="eyebrow">显存</p>
+          <h2>KV cache 为什么贵</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="kv"> 这节能复述</label>
+      </header>
+      <p>没有 KV cache，每生成一个新 token 都要对全部历史重算 attention。有了它，decode 只需读历史 K/V 并追加当前步。</p>
+      <ul>
+        <li>随<strong>序列长度</strong>线性增长（每层、每 token 存 K 与 V）</li>
+        <li>随<strong>并发</strong>线性增长（每个 in-flight 请求一份）</li>
+        <li>输出长度事先不知道，传统连续预留易碎片与浪费。vLLM 介绍博客称早期系统因碎片与过度预留浪费约 60%–80% 相关内存。<a class="cite" href="https://blog.vllm.ai/2023/06/20/vllm.html">vLLM 博客 2023</a></li>
+      </ul>
+      <div class="lab">
+        <div class="lab-h"><strong>KV 示意：点 token 看「已缓存」格子</strong></div>
+        <div class="tokens" id="kv-tokens"></div>
+        <div class="kv" id="kv-slots" aria-label="KV 槽位"></div>
+        <p class="explain">推荐类比：特征缓存若按「最大特征维 × 最大并发」整块预留会浪费；后面的 PagedAttention 像把缓存切成页按需分配。</p>
+      </div>
+      <div class="lab">
+        <div class="lab-h"><strong>KV 字节估算器（教学公式，非引擎实测）</strong></div>
+        <div class="controls">
+          <label class="field">层数 L <input type="number" id="kv-L" value="32" min="1" max="256"></label>
+          <label class="field">KV 头数 <input type="number" id="kv-H" value="8" min="1" max="128"></label>
+          <label class="field">头维 d <input type="number" id="kv-D" value="128" min="1" max="512"></label>
+          <label class="field">序列长 S <input type="number" id="kv-S" value="4096" min="1" max="1000000"></label>
+          <label class="field">并发 B <input type="number" id="kv-B" value="16" min="1" max="4096"></label>
+          <label class="field">字节/元素
+            <select id="kv-bytes"><option value="2">FP16/BF16 (2)</option><option value="1">FP8/INT8 (1)</option><option value="4">FP32 (4)</option></select>
+          </label>
+        </div>
+        <div class="result scoreline" id="kv-est">—</div>
+        <p class="explain">公式示意：<code>2 × L × H × d × S × B × bytes</code>（K 与 V 各一份）。真实引擎还有分页对齐、Cuda graph、激活等开销；GQA/MQA 会改 H。以官方估算工具为准。</p>
+      </div>
+    </section>
+
+    <section class="chapter" id="prefill" data-core="1">
+      <header class="ch-h">
+        <span class="num">08</span>
+        <div>
+          <p class="eyebrow">两阶段</p>
+          <h2>Prefill 与 Decode</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="prefill"> 这节能复述</label>
+      </header>
+      <div class="grid-2">
+        <article class="card">
+          <h3>Prefill</h3>
+          <p>整段 prompt 一次进模型，写满输入 token 的 KV。偏 <em>compute-bound</em>。决定 <strong>TTFT</strong>（多久开始吐字）。</p>
+        </article>
+        <article class="card">
+          <h3>Decode</h3>
+          <p>逐 token 生成，复用并追加 KV。偏 <em>memory-bound</em>。决定 <strong>TPOT / ITL</strong>（吐字顺不顺）。</p>
+        </article>
+      </div>
+      <div class="result">|---- Prefill（建 KV）----|======= Decode（逐 token）=======&gt;<br>　　　　　　↑ TTFT　　　　　　　　　　↑ 每个间隔 ≈ TPOT / ITL</div>
+      <table>
+        <thead><tr><th>指标</th><th>含义</th><th>推荐类比</th></tr></thead>
+        <tbody>
+          <tr><td>TTFT</td><td>到首个输出 token</td><td>首包延迟</td></tr>
+          <tr><td>TPOT</td><td>每输出 token 平均间隔</td><td>流水节拍</td></tr>
+          <tr><td>ITL</td><td>词间间隔</td><td>抖动敏感延迟</td></tr>
+          <tr><td>Throughput</td><td>tok/s 或 SLO 内 req/s</td><td>QPS（需声明 SLO）</td></tr>
+        </tbody>
+      </table>
+      <div class="callout warn">压测须固定：模型、精度、长度分布、前缀是否共享、是否流式、硬件。公开榜若几乎无共享前缀，会低估 RadixAttention / prefix cache（见 Red Hat 文提醒）。</div>
+    </section>
+
+    <section class="chapter" id="hf" data-core="1">
+      <header class="ch-h">
+        <span class="num">09</span>
+        <div>
+          <p class="eyebrow">库</p>
+          <h2>Hugging Face Transformers 做什么</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="hf"> 这节能复述</label>
+      </header>
+      <p>Transformers 提供模型类、配置、tokenizer / processor，以及高层 <code>pipeline</code> 与训练循环 <code>Trainer</code>。它是「定义与加载模型」的框架，不是高并发服务运行时。<a class="cite" href="https://huggingface.co/docs/transformers">官方文档</a></p>
+      <div class="grid-2">
+        <article class="mini"><h3>你常用的三件套</h3><p><code>AutoConfig</code> / <code>AutoModelForCausalLM</code> / <code>AutoTokenizer</code>，或对应的具体类。</p></article>
+        <article class="mini"><h3>落到磁盘</h3><p><code>config.json</code> + 权重（safetensors/bin）+ tokenizer 文件。vLLM / SGLang 读的就是这套布局（或兼容格式）。</p></article>
+      </div>
+    </section>
+
+    <section class="chapter" id="infer">
+      <header class="ch-h">
+        <span class="num">10</span>
+        <div>
+          <p class="eyebrow">体验</p>
+          <h2>用 Transformers 做第一次生成</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="infer"> 这节能复述</label>
+      </header>
+      <p>适合理解接口；高并发请交给推理引擎。</p>
+      <pre><code>from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+name = "Qwen/Qwen2.5-0.5B-Instruct"
+tok = AutoTokenizer.from_pretrained(name)
+model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16, device_map="auto")
+
+messages = [{"role": "user", "content": "用一句话解释 KV cache"}]
+text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+inputs = tok(text, return_tensors="pt").to(model.device)
+out = model.generate(**inputs, max_new_tokens=64)
+print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
+    </section>
+
+    <section class="chapter" id="train">
+      <header class="ch-h">
+        <span class="num">11</span>
+        <div>
+          <p class="eyebrow">非主线</p>
+          <h2>微调与 Trainer（扫一眼即可）</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="train"> 这节能复述</label>
+      </header>
+      <p>Transformers 的 <code>Trainer</code> / PEFT-LoRA 解决的是「怎么改权重」。本手册主线是<strong>服务化推理</strong>。训好的适配器仍常导出为可被 vLLM / SGLang 加载的格式。细节见 <a href="https://huggingface.co/docs/transformers/trainer">Trainer 文档</a>。</p>
+    </section>
+
+    <section class="chapter" id="serve-why" data-core="1">
+      <header class="ch-h">
+        <span class="num">12</span>
+        <div>
+          <p class="eyebrow">动机</p>
+          <h2>为什么不能只用 model.generate</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="serve-why"> 这节能复述</label>
+      </header>
+      <div class="grid-2">
+        <article class="card">
+          <h3>朴素实现的痛</h3>
+          <ul>
+            <li>静态 batch：短请求被长请求拖死</li>
+            <li>KV 连续预留：碎片与浪费</li>
+            <li>缺统一调度：GPU 空窗多</li>
+            <li>缺生产 API：限流、流式、多租户要自己造</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>引擎补上的能力</h3>
+          <ul>
+            <li>Continuous batching</li>
+            <li>分页 KV + 前缀复用</li>
+            <li>张量并行 / 量化 / 推测解码</li>
+            <li>OpenAI 兼容 HTTP，方便接网关</li>
+          </ul>
+        </article>
+      </div>
+      <p>vLLM 与 SGLang 都在做这件事，但起源优化点不同：前者先攻「装下更多请求」，后者先攻「相关请求少算重复前缀」（Red Hat 概括）。</p>
+    </section>
+
+    <section class="chapter" id="page" data-core="1">
+      <header class="ch-h">
+        <span class="num">13</span>
+        <div>
+          <p class="eyebrow">vLLM 核心</p>
+          <h2>PagedAttention：把 KV 切成页</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="page"> 这节能复述</label>
+      </header>
+      <p><a href="https://docs.vllm.ai/">vLLM</a> 把每条序列的 KV 切成固定大小 block，物理上不必连续，用 block table 映射——类比操作系统分页。按生成进度按需分配，减少过度预留与碎片。<a class="cite" href="https://blog.vllm.ai/2023/06/20/vllm.html">介绍博客</a></p>
+      <div class="lab">
+        <div class="lab-h">
+          <strong>内存实验室：连续预留 vs 分页</strong>
+          <div class="stepper">
+            <button type="button" id="mem-mode-contig" aria-pressed="true">连续预留</button>
+            <button type="button" id="mem-mode-page" aria-pressed="false">分页</button>
+            <button type="button" id="mem-step">模拟一步分配</button>
+            <button type="button" id="mem-reset">重置</button>
+          </div>
+        </div>
+        <div class="mem" id="mem-grid" aria-label="显存块示意"></div>
+        <p class="explain" id="mem-note">连续模式下，未用满的预留也会占格；分页模式只标记真正写入的块。颜色 A/B/C 表示不同请求。</p>
+      </div>
+      <p>分页式 KV 如今已成为现代引擎标配（SGLang 也采用同类思路）。vLLM 的差异化更多转向广模型 / 广硬件生态与工程完备度（见 Red Hat 2026-10-14 文）。</p>
+    </section>
+
+    <section class="chapter" id="batch" data-core="1">
+      <header class="ch-h">
+        <span class="num">14</span>
+        <div>
+          <p class="eyebrow">调度</p>
+          <h2>连续批处理时间线</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="batch"> 这节能复述</label>
+      </header>
+      <p>静态批处理：攒齐 N 条再算。Continuous batching：每 iteration 重新组 batch——新请求可插入，完成即离开。vLLM、SGLang、TensorRT-LLM 都以它为核心能力之一。</p>
+      <div class="lab">
+        <div class="lab-h">
+          <strong>时间线实验室</strong>
+          <div class="stepper">
+            <button type="button" id="batch-play">播放 / 暂停</button>
+            <button type="button" id="batch-reset">重置</button>
+          </div>
+        </div>
+        <div class="bars" id="batch-bars"></div>
+        <p class="explain" id="batch-note">看三条请求如何错开到达、在同一步共享 GPU，以及谁先结束离开 batch。</p>
+      </div>
+      <ul>
+        <li><strong>Chunked prefill：</strong>超长 prefill 切块，与 decode 交错，避免饿死正在吐字的请求。</li>
+        <li><strong>Preemption：</strong>KV 不够时抢占并释放，之后重算。频繁抢占会伤延迟（vLLM Optimization 文档有说明）。</li>
+      </ul>
+    </section>
+
+    <section class="chapter" id="more">
+      <header class="ch-h">
+        <span class="num">15</span>
+        <div>
+          <p class="eyebrow">扩展</p>
+          <h2>前缀缓存、量化、推测解码</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="more"> 这节能复述</label>
+      </header>
+      <div class="grid-3">
+        <article class="card"><h3>Prefix caching</h3><p>跨请求复用相同 prompt 前缀的 KV。vLLM 可配置开关；与 SGLang 的 Radix 是同一问题的不同实现重心。</p></article>
+        <article class="card"><h3>量化</h3><p>更低位宽存权重或 KV（FP8、AWQ/GPTQ 等），换显存与带宽，需业务验收质量。</p></article>
+        <article class="card"><h3>Speculative decoding</h3><p>草稿模型提议、目标模型验证，加速 decode。以当前版本文档为准。</p></article>
+      </div>
+      <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制模型抬吞吐；<strong>EP</strong> 切 MoE expert。</p>
+    </section>
+
+    <section class="chapter" id="proc" data-core="1">
+      <header class="ch-h">
+        <span class="num">16</span>
+        <div>
+          <p class="eyebrow">形态</p>
+          <h2>进程直觉与两种用法</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="proc"> 这节能复述</label>
+      </header>
+      <p>在线服务常见：API 进程收 HTTP，引擎进程（或同进程模块）做调度与 GPU 执行。多卡 TP 时还会按并行度拉起 worker。精确进程模型随 vLLM V1 等架构演进，以 <a href="https://vllm.ai/blog/2025-09-05-anatomy-of-vllm">Anatomy of vLLM</a> 与当前文档为准。</p>
+      <div class="lab">
+        <div class="lab-h"><strong>进程数计算器（示意）</strong></div>
+        <div class="controls">
+          <label class="field">API 副本 <input type="number" id="proc-api" value="1" min="1" max="64"></label>
+          <label class="field">TP size <input type="number" id="proc-tp" value="2" min="1" max="64"></label>
+          <label class="field">DP 副本 <input type="number" id="proc-dp" value="1" min="1" max="64"></label>
+        </div>
+        <div class="result scoreline" id="proc-est">—</div>
+        <p class="explain">示意：GPU worker ≈ TP × DP；外加 API 进程。真实部署还有 tokenizer、metrics、路由等，不要当成官方公式。</p>
+      </div>
+      <div class="grid-2">
+        <article class="card"><h3>在线：<code>vllm serve</code></h3><p>OpenAI 兼容 HTTP，默认端口常见 8000。适合接推荐网关。</p></article>
+        <article class="card"><h3>离线：<code>LLM.generate</code></h3><p>Python 批推理。Instruct 模型需自行套 chat template 或用 <code>llm.chat</code>。</p></article>
+      </div>
+    </section>
+
+    <section class="chapter" id="vllm-run" data-core="1">
+      <header class="ch-h">
+        <span class="num">17</span>
+        <div>
+          <p class="eyebrow">上手</p>
+          <h2>vLLM 启动与关键旋钮</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="vllm-run"> 这节能复述</label>
+      </header>
+      <p>摘自已核实的 <a href="https://docs.vllm.ai/en/latest/getting_started/quickstart.html">Quickstart</a>。环境要求随版本变。</p>
+      <pre><code>uv venv --python 3.12 --seed
+source .venv/bin/activate
+uv pip install vllm --torch-backend=auto
+vllm download-kernels
+
+vllm serve Qwen/Qwen2.5-1.5B-Instruct
+curl http://localhost:8000/v1/models</code></pre>
+      <table>
+        <thead><tr><th>配置</th><th>作用</th><th>推荐类比</th></tr></thead>
+        <tbody>
+          <tr><td><code>--max-model-len</code></td><td>上下文上限</td><td>最大 payload</td></tr>
+          <tr><td><code>--gpu-memory-utilization</code></td><td>显存占比（文档常见默认 0.92）</td><td>内存水位</td></tr>
+          <tr><td><code>-tp</code></td><td>张量并行卡数</td><td>模型分片宽度</td></tr>
+          <tr><td><code>--max-num-seqs</code></td><td>单步最多序列数</td><td>最大并发</td></tr>
+          <tr><td><code>--max-num-batched-tokens</code></td><td>单步 token 预算</td><td>批配额；影响 TTFT↔ITL</td></tr>
+          <tr><td>prefix caching 开关</td><td>前缀缓存</td><td>公共特征缓存</td></tr>
+        </tbody>
+      </table>
+      <pre><code>vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.90 \
+  --max-model-len 8192</code></pre>
+      <div class="callout warn">参数名与默认值请以 <code>vllm serve --help</code> 与 Optimization 页为准。频繁 preemption → 提高 utilization、降并发或加大 TP。</div>
+    </section>
+
+    <section class="chapter" id="sglang" data-core="1">
+      <header class="ch-h">
+        <span class="num">18</span>
+        <div>
+          <p class="eyebrow">SGLang 核心</p>
+          <h2>RadixAttention：跨请求前缀复用</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="sglang"> 这节能复述</label>
+      </header>
+      <p><a href="https://docs.sglang.ai/">SGLang</a>（Structured Generation Language）是面向 LLM 与多模态的高性能 serving 框架。后端核心 <strong>RadixAttention</strong>：请求结束后不立刻丢弃 KV，而把 token 前缀索引进 radix 树；新请求做最长前缀匹配，命中则只算后缀。<a class="cite" href="https://lmsys.org/blog/2024-01-17-sglang/">LMSYS 博客</a></p>
+      <div class="lab">
+        <div class="lab-h">
+          <strong>前缀树示意</strong>
+          <div class="stepper">
+            <button type="button" id="radix-step">匹配下一步</button>
+            <button type="button" id="radix-reset">重置</button>
+          </div>
+        </div>
+        <div class="radix" id="radix-tree"></div>
+        <p class="explain" id="radix-note">共享 system prompt 的多会话，会在树的上层节点命中（高亮）。这是 agent / 多轮 / few-shot 场景的收益来源。</p>
+      </div>
+      <table>
+        <thead><tr><th>维度</th><th>vLLM（起源重心）</th><th>SGLang（起源重心）</th></tr></thead>
+        <tbody>
+          <tr><td>KV 分配</td><td>PagedAttention 降碎片</td><td>高效分页 + radix 索引</td></tr>
+          <tr><td>跨请求复用</td><td>Prefix caching（可配置）</td><td>RadixAttention 自动前缀复用</td></tr>
+          <tr><td>前端</td><td>OpenAI API / 引擎参数</td><td>OpenAI API + 结构化生成 / DSL 传统</td></tr>
+          <tr><td>今日</td><td colspan="2">两边都在吸收对方能力；选型看负载与生态，而非 2023 标签</td></tr>
+        </tbody>
+      </table>
+      <p>物理 KV 仍在 GPU 分页存放；Radix 解决「如何发现并复用前缀」，PagedAttention 解决「如何高效分配单请求 KV 页」——互补。</p>
+    </section>
+
+    <section class="chapter" id="sglang-run" data-core="1">
+      <header class="ch-h">
+        <span class="num">19</span>
+        <div>
+          <p class="eyebrow">上手</p>
+          <h2>SGLang 启动与前缀实验</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="sglang-run"> 这节能复述</label>
+      </header>
+      <p>来自已核实的 <a href="https://docs.sglang.ai/get_started/install.html">Install</a> 与 <a href="https://docs.sglang.io/docs/get-started/quickstart">Quickstart</a>。文档同时出现 <code>sglang serve</code> 与 <code>python3 -m sglang.launch_server</code>；以本机 <code>--help</code> 为准。示例端口多为 <strong>30000</strong>。</p>
+      <pre><code>uv venv --python 3.12
+source .venv/bin/activate
+uv pip install --prerelease=allow sglang
+
+sglang serve MODEL_PATH --host 0.0.0.0 --port 30000
+
+curl http://localhost:30000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"MODEL_PATH","messages":[{"role":"user","content":"What is the capital of France?"}]}'</code></pre>
+      <pre><code>import openai
+client = openai.Client(base_url="http://127.0.0.1:30000/v1", api_key="None")
+resp = client.chat.completions.create(
+    model="qwen/qwen2.5-0.5b-instruct",
+    messages=[{"role":"user","content":"List 3 countries and their capitals."}],
+    temperature=0, max_tokens=64,
+)
+print(resp.choices[0].message.content)</code></pre>
+      <div class="callout ok">
+        <strong>前缀实验提纲：</strong>
+        <ol>
+          <li>固定长 system prompt，只改 user 内容，跑多会话</li>
+          <li>预热后测稳态 TTFT</li>
+          <li>按官方参数开关 radix / prefix 缓存对比（名称以 <code>--help</code> 为准，如文档中的 disable-radix-cache 一类）</li>
+          <li>记录引擎版本、GPU、完整启动命令</li>
+        </ol>
+      </div>
+      <p>常见参数族（<strong>以本机 help 为准</strong>）：<code>--tp-size</code>、<code>--mem-fraction-static</code>、radix 相关开关等。</p>
+    </section>
+
+    <section class="chapter" id="choose" data-core="1">
+      <header class="ch-h">
+        <span class="num">20</span>
+        <div>
+          <p class="eyebrow">选型</p>
+          <h2>vLLM vs SGLang 怎么选</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="choose"> 这节能复述</label>
+      </header>
+      <table>
+        <thead><tr><th>维度</th><th>vLLM</th><th>SGLang</th></tr></thead>
+        <tbody>
+          <tr><td>生态体量</td><td>通常更大、recipes 多</td><td>增长快；与部分开源前沿模型协作深</td></tr>
+          <tr><td>易用性</td><td><code>vllm serve</code> + OpenAI API</td><td><code>sglang serve</code> + OpenAI API；另有可编程前端</td></tr>
+          <tr><td>前缀复用</td><td>Prefix caching</td><td>RadixAttention 为设计原点</td></tr>
+          <tr><td>优先考虑</td><td>通用模型快速上线、广兼容</td><td>多轮 / agent / 共享前缀明显、大 MoE</td></tr>
+        </tbody>
+      </table>
+      <p><strong>Red Hat（2026-10-14）</strong>：多模型默认配置下两者表现常接近，选择更多看功能交付；其样例表 prompt 几乎无共享前缀，不能代表 chat/agent 收益。原文：
+      <a href="https://developers.redhat.com/articles/2026/10/14/vllm-vs-sglang-choosing-the-right-inference-engine-for-your-workload">vLLM vs SGLang</a>。本文不转录具体吞吐数字。</p>
+      <p><strong>Baseten §4.3</strong>：vLLM / SGLang 易用、模型日更广；TRT-LLM 上限高更难；按部署选择。
+      <a href="https://www.baseten.co/inference-engineering/book/04-software/inference-engines/">Inference Engines</a></p>
+      <div class="callout ok"><strong>实践：</strong>同一套录制流量（含真实 system 与多轮）在相同 GPU 上画「并发–TTFT p95–输出 tok/s」，再看运维成本。不要只看明星榜。</div>
+    </section>
+
+    <section class="chapter" id="gateway" data-core="1">
+      <header class="ch-h">
+        <span class="num">21</span>
+        <div>
+          <p class="eyebrow">落地</p>
+          <h2>对接网关与监控最小集</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="gateway"> 这节能复述</label>
+      </header>
+      <ul>
+        <li>网关只改 <code>base_url</code> / <code>api_key</code>，走 OpenAI Compatible</li>
+        <li>超时分层：连接超时、首 token 超时（TTFT SLO）、总超时</li>
+        <li>重试只对可安全重试错误；注意流式中途失败</li>
+        <li>SSE 给到端；反向代理注意缓冲与 idle timeout</li>
+        <li>限流：租户 QPS、token 预算、按模型</li>
+        <li>路由 / A/B：served-model-name 或网关键</li>
+      </ul>
+      <h3>监控最小集</h3>
+      <p>TTFT、TPOT/ITL、端到端延迟、队列长度、GPU util、显存、preemption 次数、缓存命中率（若有）。</p>
+      <table>
+        <thead><tr><th>现象</th><th>常见原因</th><th>方向</th></tr></thead>
+        <tbody>
+          <tr><td>OOM</td><td>模型+KV 超显存；上下文过大</td><td>降 max-model-len / 并发；量化；加 TP</td></tr>
+          <tr><td>TTFT 变差</td><td>长 prefill、排队、冷启动、缓存未命中</td><td>chunked prefill、限流、预热、稳定前缀</td></tr>
+          <tr><td>ITL 高</td><td>batch 混入大块 prefill；并发过高</td><td>调 batched tokens；优先 decode</td></tr>
+          <tr><td>多轮越聊越慢</td><td>上下文变长，KV 膨胀</td><td>截断 / 摘要；前缀缓存</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="chapter" id="path" data-core="1">
+      <header class="ch-h">
+        <span class="num">22</span>
+        <div>
+          <p class="eyebrow">路线</p>
+          <h2>4–6 周学习路线 + 练习六件事</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="path"> 这节能复述</label>
+      </header>
+      <div class="grid-2">
+        <article class="card">
+          <h3>周 1 · 概念对齐</h3>
+          <p>讲清 prefill/decode、KV、continuous batching、TTFT/TPOT。画推荐↔推理对照表。读 Red Hat 文前半与 vLLM PagedAttention 博客。</p>
+        </article>
+        <article class="card">
+          <h3>周 2 · 跑通 vLLM</h3>
+          <p>Quickstart + curl / OpenAI SDK。试 max-model-len、gpu-memory-utilization。用业务风格 prompt 跑 100 次记 TTFT。</p>
+        </article>
+        <article class="card">
+          <h3>周 3 · 压测</h3>
+          <p>固定长度扫并发；观察 preemption。输出「并发 vs TTFT p95 vs tok/s」。读 Optimization 文档。</p>
+        </article>
+        <article class="card">
+          <h3>周 4 · SGLang + 前缀</h3>
+          <p>Quickstart；共享 system 多会话；开关 radix/prefix 对比 TTFT。读 LMSYS Radix 博客。</p>
+        </article>
+        <article class="card">
+          <h3>周 5 · 对比选型</h3>
+          <p>同硬件同流量回放两引擎；一页纸选型（含「仍需复测」）。读 Red Hat 全文与 Baseten §4.3。</p>
+        </article>
+        <article class="card">
+          <h3>周 6 · 进阶（可选）</h3>
+          <p>TP 多卡；接网关超时/限流/监控；故障手册含 OOM、排队、冷启动。</p>
+        </article>
+      </div>
+      <h3>练习六件事（可打卡）</h3>
+      <ol>
+        <li>手算或口述一遍注意力公式与因果掩码</li>
+        <li>用估算器感受 KV 随并发/长度膨胀</li>
+        <li>本地 <code>vllm serve</code> + 一次 chat completions</li>
+        <li>本地 <code>sglang serve</code> + 一次 chat completions</li>
+        <li>构造高前缀重叠流量，对比缓存开/关</li>
+        <li>写一页「推荐指标 ↔ 推理指标 ↔ 告警阈值」草案</li>
+      </ol>
+      <div class="callout">每周五输出一页纸（指标图 + 结论 + 下周问题）。验收附引擎版本、GPU、完整启动命令。</div>
+    </section>
+
+    <section class="chapter" id="quiz" data-core="1">
+      <header class="ch-h">
+        <span class="num">23</span>
+        <div>
+          <p class="eyebrow">自测</p>
+          <h2>做完再往下翻答案解释</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="quiz"> 这节能复述</label>
+      </header>
+      <p class="scoreline">得分：<strong id="quiz-score">0</strong> / <span id="quiz-total">0</span>
+        <button type="button" class="ghost" id="quiz-reset" style="margin-left:8px;color:var(--ink);border-color:var(--line)">重做</button>
+      </p>
+      <div id="quiz-box"></div>
+    </section>
+
+    <section class="chapter" id="faq">
+      <header class="ch-h">
+        <span class="num">24</span>
+        <div>
+          <p class="eyebrow">问答</p>
+          <h2>推荐同学常问</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="faq"> 这节能复述</label>
+      </header>
+      <div class="q"><strong>Q. 我们该先上 vLLM 还是 SGLang？</strong>
+        <p class="explain">两周内要稳妥上线通用开源模型 → 多数团队先 vLLM。流量明显共享 system/工具定义 → 必须认真测 SGLang。最终用自家回放数据说话。</p></div>
+      <div class="q"><strong>Q. slang 是另一个项目吗？</strong>
+        <p class="explain">口语里通常就是 SGLang。若有人指别的缩写，让对方给出仓库链接再对齐。</p></div>
+      <div class="q"><strong>Q. 和排序服务共用 GPU 行吗？</strong>
+        <p class="explain">技术上可能，运维上很痛：KV 膨胀会挤占，延迟抖动互相放大。生产更常见是推理池独立，经网关调用。</p></div>
+      <div class="q"><strong>Q. 为什么榜单和我压测差很多？</strong>
+        <p class="explain">长度分布、前缀重叠、是否流式、精度、是否默认配置都不同。无共享前缀的榜会低估 radix/prefix。</p></div>
+      <div class="q"><strong>Q. OpenAI SDK 能直接打两家吗？</strong>
+        <p class="explain">可以。改 base_url 与 model 名即可。注意 chat template / tool call 细节仍可能有差异，以各引擎文档为准。</p></div>
+    </section>
+
+    <section class="chapter" id="glossary">
+      <header class="ch-h">
+        <span class="num">25</span>
+        <div>
+          <p class="eyebrow">术语</p>
+          <h2>可过滤词表</h2>
+        </div>
+        <label class="got"><input type="checkbox" data-got="glossary"> 这节能复述</label>
+      </header>
+      <label class="field">过滤 <input type="search" id="gloss-filter" placeholder="例如 Radix、TTFT、TP…"></label>
+      <div class="glossary" id="gloss-list"></div>
+    </section>
+
+    <section class="chapter" id="sources">
+      <header class="ch-h">
+        <span class="num">26</span>
+        <div>
+          <p class="eyebrow">出处</p>
+          <h2>主要来源（撰写时核实）</h2>
+        </div>
+      </header>
+      <ul>
+        <li>Transformer 论文：<a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a></li>
+        <li>HF Transformers：<a href="https://huggingface.co/docs/transformers">文档</a> · <a href="https://github.com/huggingface/transformers">GitHub</a></li>
+        <li>vLLM：<a href="https://docs.vllm.ai/">docs.vllm.ai</a> · <a href="https://blog.vllm.ai/2023/06/20/vllm.html">PagedAttention 博客</a> · <a href="https://vllm.ai/blog/2025-09-05-anatomy-of-vllm">Anatomy</a> · <a href="https://github.com/vllm-project/vllm">GitHub</a></li>
+        <li>SGLang：<a href="https://docs.sglang.ai/">docs.sglang.ai</a> · <a href="https://docs.sglang.io/">docs.sglang.io</a> · <a href="https://lmsys.org/blog/2024-01-17-sglang/">LMSYS Radix 博客</a> · <a href="https://github.com/sgl-project/sglang">GitHub</a></li>
+        <li>对比：<a href="https://developers.redhat.com/articles/2026/10/14/vllm-vs-sglang-choosing-the-right-inference-engine-for-your-workload">Red Hat 2026-10-14</a> · <a href="https://www.baseten.co/inference-engineering/book/04-software/inference-engines/">Baseten Inference Engines</a></li>
+      </ul>
+      <div class="callout warn">
+        <strong>需再核对：</strong>SGLang 双文档域；启动入口 <code>sglang serve</code> vs <code>launch_server</code>；CUDA/Python 下限与默认 utilization 随发行版变化。公开 benchmark 数字请打开原文，本页不固化转录。
+      </div>
+    </section>
+
+    <footer>
+      <p>整合版：参考页交互与纸质侧栏视觉 + 推荐对照 / SGLang / 选型 / 网关监控 / 学习路线。日期 2026-10-15。</p>
+      <p>文件：<code>/workspace/vllm-sglang-learning-handbook.html</code></p>
+    </footer>
+  </main>
+</div>
+
+<script>
+(function () {
+  const $ = (s, r=document) => r.querySelector(s);
+  const $$ = (s, r=document) => [...r.querySelectorAll(s)];
+
+  /* ---------- progress ---------- */
+  const bar = $('#bar');
+  function onScroll() {
+    const h = document.documentElement;
+    const max = h.scrollHeight - h.clientHeight;
+    bar.style.width = (max > 0 ? (h.scrollTop / max) * 100 : 0) + '%';
+    const chapters = $$('section.chapter, header.hero');
+    let cur = null;
+    for (const el of chapters) {
+      if (el.getBoundingClientRect().top <= 120) cur = el.id;
+    }
+    $$('#nav a').forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + cur));
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  /* ---------- core-only ---------- */
+  const coreBtn = $('#core-toggle');
+  const CORE_KEY = 'handbook-core-only';
+  function setCore(on) {
+    document.body.classList.toggle('core-only', on);
+    coreBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    coreBtn.textContent = on ? '显示全部' : '只看主线';
+    localStorage.setItem(CORE_KEY, on ? '1' : '0');
+  }
+  setCore(localStorage.getItem(CORE_KEY) === '1');
+  coreBtn.addEventListener('click', () => setCore(document.body.classList.contains('core-only') ? false : true));
+
+  /* ---------- got checkboxes ---------- */
+  const GOT_KEY = 'handbook-got-v2';
+  let got = {};
+  try { got = JSON.parse(localStorage.getItem(GOT_KEY) || '{}'); } catch (e) { got = {}; }
+  $$('input[data-got]').forEach(inp => {
+    const k = inp.getAttribute('data-got');
+    inp.checked = !!got[k];
+    inp.addEventListener('change', () => {
+      got[k] = inp.checked;
+      localStorage.setItem(GOT_KEY, JSON.stringify(got));
+    });
+  });
+  $('#reset-got').addEventListener('click', () => {
+    got = {};
+    localStorage.setItem(GOT_KEY, '{}');
+    $$('input[data-got]').forEach(i => i.checked = false);
+  });
+
+  /* ---------- mobile nav ---------- */
+  const nav = $('#nav');
+  const menuBtn = $('#menu-btn');
+  menuBtn.addEventListener('click', () => {
+    const open = nav.classList.toggle('open');
+    menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  $$('#nav a').forEach(a => a.addEventListener('click', () => {
+    nav.classList.remove('open');
+    menuBtn.setAttribute('aria-expanded', 'false');
+  }));
+
+  /* ---------- copy code ---------- */
+  $$('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy';
+    btn.textContent = '复制';
+    btn.addEventListener('click', async () => {
+      const text = pre.innerText.replace(/^复制\n?/, '');
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = '已复制';
+        setTimeout(() => btn.textContent = '复制', 1200);
+      } catch (e) {
+        btn.textContent = '失败';
+      }
+    });
+    pre.appendChild(btn);
+  });
+
+  /* ---------- arch view ---------- */
+  const archNotes = {
+    all: '显示整块：嵌入 → 注意力 →（交叉）→ 前馈 → 归一化 → 输出头。',
+    attn: '自注意力决定「从哪些位置取信息」，也是 KV cache 的来源。',
+    ffn: '前馈网络逐位置变换，通常占参数量很大部分。',
+    cross: '仅编码器–解码器架构需要；纯解码器 LLM 可忽略。'
+  };
+  $$('#arch-view button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      $$('#arch-view button').forEach(b => b.setAttribute('aria-pressed', 'false'));
+      btn.setAttribute('aria-pressed', 'true');
+      const v = btn.dataset.view;
+      $('#arch-note').textContent = archNotes[v];
+      $$('#arch-stack .blk').forEach(blk => {
+        const p = blk.dataset.part;
+        let show = true;
+        if (v === 'attn') show = p === 'attn';
+        if (v === 'ffn') show = p === 'ffn';
+        if (v === 'cross') show = p === 'cross';
+        blk.style.opacity = show ? '1' : '.35';
+      });
+    });
+  });
+
+  /* ---------- attention lab ---------- */
+  const labels = ['我', '爱', '推', '理'];
+  const attnBox = $('#attn-tokens');
+  const maskBox = $('#attn-mask');
+  let attnPos = 0;
+  let attnStep = 0;
+  const attnTexts = [
+    '选一个查询位置（Q）。因果掩码下它只能看自己及左侧。',
+    '计算该位置对可见 key 的点积，再除以 √dₖ。',
+    'softmax 得到权重：越相关的位置颜色越深。',
+    '用权重对 V 做加权和，得到该位置输出。',
+    '多头把上述过程做多次再拼接。点「下一步」可换查询位置。'
+  ];
+  labels.forEach((t, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'tok';
+    b.textContent = t;
+    b.setAttribute('aria-pressed', i === 0 ? 'true' : 'false');
+    b.addEventListener('click', () => {
+      attnPos = i;
+      $$('#attn-tokens .tok').forEach((x, j) => x.setAttribute('aria-pressed', j === i ? 'true' : 'false'));
+      renderAttn();
+    });
+    attnBox.appendChild(b);
+  });
+  function renderAttn() {
+    $('#attn-step-label').textContent = `步骤 ${attnStep + 1} / 5 · 查询「${labels[attnPos]}」`;
+    $('#attn-explain').textContent = attnTexts[attnStep];
+    maskBox.innerHTML = '';
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 4; c++) {
+        const i = document.createElement('i');
+        if (c > r) { /* future */ }
+        else if (r === attnPos && c <= attnPos) {
+          i.className = c === attnPos ? 'on' : 'mid';
+        } else if (c <= r) {
+          i.style.opacity = '.35';
+        }
+        maskBox.appendChild(i);
+      }
+    }
+  }
+  $('#attn-prev').addEventListener('click', () => { attnStep = (attnStep + 4) % 5; renderAttn(); });
+  $('#attn-next').addEventListener('click', () => {
+    if (attnStep === 4) attnPos = (attnPos + 1) % 4;
+    attnStep = (attnStep + 1) % 5;
+    $$('#attn-tokens .tok').forEach((x, j) => x.setAttribute('aria-pressed', j === attnPos ? 'true' : 'false'));
+    renderAttn();
+  });
+  renderAttn();
+
+  /* ---------- KV tokens demo ---------- */
+  const kvTok = $('#kv-tokens');
+  const kvSlots = $('#kv-slots');
+  const seq = ['sys', 'user', '…', 'out1', 'out2', 'out3'];
+  let filled = 2;
+  seq.forEach((t, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'tok';
+    b.textContent = t;
+    b.addEventListener('click', () => { filled = i + 1; renderKv(); });
+    kvTok.appendChild(b);
+  });
+  function renderKv() {
+    kvSlots.innerHTML = '';
+    seq.forEach((t, i) => {
+      const a = document.createElement('article');
+      a.innerHTML = `<b>${t}</b><div class="slot ${i < filled ? 'filled' : ''}">${i < filled ? 'K,V' : '空'}</div>`;
+      kvSlots.appendChild(a);
+    });
+  }
+  renderKv();
+
+  /* ---------- KV estimator ---------- */
+  function fmtBytes(n) {
+    if (n < 1024) return n.toFixed(0) + ' B';
+    if (n < 1024**2) return (n/1024).toFixed(1) + ' KiB';
+    if (n < 1024**3) return (n/1024**2).toFixed(2) + ' MiB';
+    return (n/1024**3).toFixed(2) + ' GiB';
+  }
+  function updateKvEst() {
+    const L = +$('#kv-L').value, H = +$('#kv-H').value, D = +$('#kv-D').value;
+    const S = +$('#kv-S').value, B = +$('#kv-B').value, by = +$('#kv-bytes').value;
+    const total = 2 * L * H * D * S * B * by;
+    $('#kv-est').textContent = `约 ${fmtBytes(total)}　（单请求 ${fmtBytes(total / Math.max(B,1))}）`;
+  }
+  ['kv-L','kv-H','kv-D','kv-S','kv-B','kv-bytes'].forEach(id => $( '#'+id ).addEventListener('input', updateKvEst));
+  updateKvEst();
+
+  /* ---------- PagedAttention mem lab ---------- */
+  const mem = $('#mem-grid');
+  let memMode = 'contig';
+  let memTick = 0;
+  const reqs = [
+    { k: 'A', need: 5 },
+    { k: 'B', need: 4 },
+    { k: 'C', need: 6 }
+  ];
+  function paintMem() {
+    mem.innerHTML = '';
+    const cells = Array(32).fill(null);
+    if (memMode === 'contig') {
+      // reserve max 8 for each in order — waste
+      let cursor = 0;
+      reqs.forEach((r, idx) => {
+        const reserved = 8;
+        const used = Math.min(r.need, Math.max(0, memTick - idx));
+        for (let i = 0; i < reserved && cursor < 32; i++, cursor++) {
+          cells[cursor] = i < used ? r.k : 'D'; // D = reserved waste
+        }
+      });
+    } else {
+      let cursor = 0;
+      reqs.forEach((r, idx) => {
+        const used = Math.min(r.need, Math.max(0, memTick - idx));
+        for (let i = 0; i < used && cursor < 32; i++, cursor++) cells[cursor] = r.k;
+      });
+    }
+    cells.forEach((k, i) => {
+      const el = document.createElement('i');
+      if (k) el.dataset.k = k;
+      el.title = k === 'D' ? '预留未用' : (k || '空');
+      el.textContent = k === 'D' ? '·' : '';
+      mem.appendChild(el);
+    });
+    const waste = cells.filter(x => x === 'D').length;
+    const used = cells.filter(x => x && x !== 'D').length;
+    $('#mem-note').textContent = memMode === 'contig'
+      ? `连续预留：已用 ${used} 格，预留浪费 ${waste} 格（深色）。`
+      : `分页：只占已用 ${used} 格，碎片更少；空格可给新请求。`;
+  }
+  $('#mem-mode-contig').addEventListener('click', () => {
+    memMode = 'contig';
+    $('#mem-mode-contig').setAttribute('aria-pressed','true');
+    $('#mem-mode-page').setAttribute('aria-pressed','false');
+    paintMem();
+  });
+  $('#mem-mode-page').addEventListener('click', () => {
+    memMode = 'page';
+    $('#mem-mode-page').setAttribute('aria-pressed','true');
+    $('#mem-mode-contig').setAttribute('aria-pressed','false');
+    paintMem();
+  });
+  $('#mem-step').addEventListener('click', () => { memTick++; paintMem(); });
+  $('#mem-reset').addEventListener('click', () => { memTick = 0; paintMem(); });
+  paintMem();
+
+  /* ---------- continuous batching ---------- */
+  const batchBars = $('#batch-bars');
+  const jobs = [
+    { name: 'R1', color: '#b5522a', arrival: 0, prefill: 3, decode: 8 },
+    { name: 'R2', color: '#0f6e62', arrival: 2, prefill: 2, decode: 5 },
+    { name: 'R3', color: '#8d6b2f', arrival: 4, prefill: 4, decode: 6 }
+  ];
+  let batchT = 0, batchTimer = null;
+  function renderBatch() {
+    batchBars.innerHTML = '';
+    jobs.forEach(j => {
+      const start = j.arrival;
+      const pfEnd = start + j.prefill;
+      const end = pfEnd + j.decode;
+      const phase = batchT < start ? '等待' : batchT < pfEnd ? 'Prefill' : batchT < end ? 'Decode' : '完成';
+      const pct = Math.max(0, Math.min(100, ((batchT - start) / (j.prefill + j.decode)) * 100));
+      const row = document.createElement('div');
+      row.className = 'bar';
+      row.innerHTML = `<span>${j.name}</span><span class="track"><i style="width:${pct}%;background:${j.color}"></i></span><span>${phase}</span>`;
+      batchBars.appendChild(row);
+    });
+    $('#batch-note').textContent = `时刻 t=${batchT}：新请求可在中途加入；完成后离开，GPU 时间线被更充分利用。`;
+  }
+  $('#batch-play').addEventListener('click', () => {
+    if (batchTimer) { clearInterval(batchTimer); batchTimer = null; return; }
+    batchTimer = setInterval(() => {
+      batchT++;
+      if (batchT > 20) { batchT = 0; }
+      renderBatch();
+    }, 450);
+  });
+  $('#batch-reset').addEventListener('click', () => {
+    if (batchTimer) { clearInterval(batchTimer); batchTimer = null; }
+    batchT = 0; renderBatch();
+  });
+  renderBatch();
+
+  /* ---------- process estimator ---------- */
+  function updateProc() {
+    const api = +$('#proc-api').value, tp = +$('#proc-tp').value, dp = +$('#proc-dp').value;
+    $('#proc-est').textContent = `示意 GPU worker ≈ ${tp * dp}；API 进程 ≈ ${api}；合计粗算 ${tp * dp + api}（非官方公式）`;
+  }
+  ['proc-api','proc-tp','proc-dp'].forEach(id => $('#'+id).addEventListener('input', updateProc));
+  updateProc();
+
+  /* ---------- radix demo ---------- */
+  const radix = $('#radix-tree');
+  const radixNodes = [
+    { d: 0, t: 'root', hit: false },
+    { d: 1, t: '「你是推荐助手…」', hit: true },
+    { d: 2, t: '…工具定义 JSON…', hit: true },
+    { d: 3, t: 'user: 解释 TTFT', hit: false },
+    { d: 3, t: 'user: 解释 KV', hit: false }
+  ];
+  let radixStep = 0;
+  function renderRadix() {
+    radix.innerHTML = '';
+    radixNodes.forEach((n, i) => {
+      const el = document.createElement('div');
+      el.className = 'node' + (n.hit && i <= radixStep + 1 ? ' hit' : '');
+      el.style.setProperty('--d', n.d);
+      el.textContent = n.t;
+      radix.appendChild(el);
+    });
+    $('#radix-note').textContent = radixStep === 0
+      ? '树中缓存了共享 system + 工具定义。'
+      : radixStep === 1
+      ? '新请求匹配到 system 节点，KV 可复用。'
+      : '继续匹配工具定义；仅 user 后缀需要新算。';
+  }
+  $('#radix-step').addEventListener('click', () => { radixStep = Math.min(2, radixStep + 1); renderRadix(); });
+  $('#radix-reset').addEventListener('click', () => { radixStep = 0; renderRadix(); });
+  renderRadix();
+
+  /* ---------- quiz ---------- */
+  const questions = [
+    { q: 'Decode 阶段更常被描述为？', opts: ['Compute-bound，决定 TTFT', 'Memory-bound，强依赖 KV 带宽', '与 prefill 完全相同', '不需要注意力'], a: 1, why: 'Decode 反复读历史 KV，通常吃显存带宽；Prefill 更偏算力。' },
+    { q: 'PagedAttention 主要解决什么？', opts: ['提高词表大小', 'KV 连续预留导致的碎片与浪费', '替代 softmax', '自动写训练代码'], a: 1, why: '把 KV 切成页按需映射，类比 OS 分页。' },
+    { q: 'RadixAttention 的独特重心是？', opts: ['只做量化', '跨请求自动前缀匹配复用 KV', '只支持 encoder-only', '取消 continuous batching'], a: 1, why: 'radix 树索引前缀，适合多轮/agent 共享 prompt。' },
+    { q: 'TTFT 对应推荐侧更像？', opts: ['特征维度', '首包 / 首屏延迟', '离线小时级批任务', '词表大小'], a: 1, why: '用户感知「多久开始吐字」。' },
+    { q: '口语 slang 在本手册指？', opts: ['Shell 别名', 'SGLang 推理引擎', 'Python ast', 'Slack 机器人'], a: 1, why: 'Structured Generation Language，常与 vLLM 对比。' },
+    { q: '公开榜几乎无共享前缀时，可能？', opts: ['高估 radix/prefix 收益', '低估 radix/prefix 收益', '不影响', '只影响训练'], a: 1, why: '前缀复用场景的收益不会体现在无重叠流量上。' },
+    { q: 'Continuous batching 允许？', opts: ['请求中途加入、完成即离开', '必须等齐固定 batch', '禁止流式', '只能单卡'], a: 0, why: '每 iteration 重组成 batch，提高 GPU 利用率。' },
+    { q: '把推理接到推荐网关，优先？', opts: ['重写全部客户端协议', 'OpenAI Compatible base_url', '只能 gRPC 自研', '必须同进程嵌入排序'], a: 1, why: '两引擎都提供 OpenAI 兼容 HTTP，改 base_url 即可起步。' }
+  ];
+  const quizBox = $('#quiz-box');
+  $('#quiz-total').textContent = questions.length;
+  let score = 0;
+  const answered = new Set();
+  function renderQuiz() {
+    quizBox.innerHTML = '';
+    score = 0; answered.clear();
+    $('#quiz-score').textContent = '0';
+    questions.forEach((item, qi) => {
+      const div = document.createElement('div');
+      div.className = 'q';
+      div.innerHTML = `<strong>${qi + 1}. ${item.q}</strong>`;
+      item.opts.forEach((opt, oi) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'opt';
+        b.textContent = opt;
+        b.addEventListener('click', () => {
+          if (answered.has(qi)) return;
+          answered.add(qi);
+          const good = oi === item.a;
+          if (good) score++;
+          $('#quiz-score').textContent = String(score);
+          $$('.opt', div).forEach((x, j) => {
+            if (j === item.a) x.classList.add('good');
+            if (j === oi && !good) x.classList.add('bad');
+          });
+          const ex = document.createElement('p');
+          ex.className = 'explain';
+          ex.textContent = item.why;
+          div.appendChild(ex);
+        });
+        div.appendChild(b);
+      });
+      quizBox.appendChild(div);
+    });
+  }
+  $('#quiz-reset').addEventListener('click', renderQuiz);
+  renderQuiz();
+
+  /* ---------- glossary ---------- */
+  const terms = [
+    ['Transformer', '以注意力为核心的神经网络结构（2017 论文）。'],
+    ['Transformers（库）', 'Hugging Face 的模型定义与训练/推理框架。'],
+    ['vLLM', '高吞吐 LLM 推理与服务引擎，PagedAttention 起源。'],
+    ['SGLang', 'Structured Generation Language，高性能 serving；口语 slang 通常指它。'],
+    ['Prefill', '处理完整输入并构建 KV 的阶段，影响 TTFT。'],
+    ['Decode', '自回归生成后续 token 的阶段，影响 TPOT/ITL。'],
+    ['KV Cache', '缓存的 attention Key/Value，用显存换重复计算。'],
+    ['PagedAttention', '页式 KV 管理（vLLM 代表作）。'],
+    ['RadixAttention', 'radix 树前缀索引的跨请求 KV 复用（SGLang）。'],
+    ['Continuous Batching', '请求动态组成 batch 的持续调度。'],
+    ['TTFT', 'Time To First Token，首 token 时延。'],
+    ['TPOT', 'Time Per Output Token，每输出 token 平均间隔。'],
+    ['ITL', 'Inter-Token Latency，词间间隔。'],
+    ['TP / PP / DP / EP', '张量 / 流水 / 数据 / 专家 并行。'],
+    ['Prefix Caching', '跨请求复用相同 prompt 前缀的 KV。'],
+    ['Speculative Decoding', '草稿模型提议、目标模型验证以加速。'],
+    ['Chunked Prefill', '把长 prefill 切块与 decode 交错调度。'],
+    ['Preemption', 'KV 不够时抢占请求释放显存，之后可能重算。'],
+    ['GQA / MQA', '分组/多查询注意力，减少 KV 头数以省显存。'],
+    ['OpenAI Compatible', '提供 /v1/chat/completions 一类 HTTP 接口。']
+  ];
+  const gloss = $('#gloss-list');
+  function renderGloss(filter='') {
+    const f = filter.trim().toLowerCase();
+    gloss.innerHTML = '';
+    terms.forEach(([k, v]) => {
+      if (f && !k.toLowerCase().includes(f) && !v.toLowerCase().includes(f)) return;
+      const art = document.createElement('article');
+      art.innerHTML = `<dt>${k}</dt><dd>${v}</dd>`;
+      gloss.appendChild(art);
+    });
+  }
+  $('#gloss-filter').addEventListener('input', e => renderGloss(e.target.value));
+  renderGloss();
+})();
+</script>
+</body>
+</html>
