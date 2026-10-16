@@ -236,7 +236,7 @@
   <nav class="nav" id="nav" aria-label="章节">
     <div class="brand">
       <strong>Transformer → 推理引擎</strong>
-      <span>推荐后台 · vLLM / SGLang · 2026-10-15</span>
+      <span>推荐后台 · 单张 T4 · Qwen3.5-9B · 2026-10-16</span>
     </div>
     <div class="nav-actions">
       <button type="button" id="core-toggle" aria-pressed="false">只看主线</button>
@@ -284,9 +284,10 @@
         <h1>从 Transformer 到 vLLM / SGLang</h1>
         <p class="lede">先看清模型怎么算，再看 Hugging Face Transformers 怎么加载权重，最后看 vLLM 与 SGLang 怎么把同一份权重做成高吞吐推理服务——并对照推荐后台熟悉的 QPS、缓存与批处理语言。</p>
         <ul class="meta">
-          <li>文档核对日期 2026-10-15</li>
+          <li>文档核对日期 2026-10-16</li>
           <li>读者：推荐架构后台</li>
-          <li>主线含 vLLM + SGLang 核心</li>
+          <li>演示机：单张 NVIDIA T4，16GB</li>
+          <li>主模型：Qwen3.5-9B（T4 上走 W4A16 文本）</li>
           <li>不编造未核实 benchmark</li>
         </ul>
         <p>接口与默认值随版本变化。每节末尾链到官方页；落地前请再看一次文档顶部版本。口语里的「slang」在本文一律写作 <strong>SGLang</strong>。</p>
@@ -324,7 +325,7 @@
         </article>
         <article class="card">
           <h3>阅读约定</h3>
-          <p>安装命令、默认端口、配置项以各项目官方文档为准。文中命令级示例来自 2026-10-15 前后核实过的页面。不编造未核实的吞吐数字；公开对比只给链接与定性结论。</p>
+          <p>安装命令、默认端口、配置项以各项目官方文档为准。文中命令级示例来自 2026-10-16 前后核实过的页面。不编造未核实的吞吐数字；公开对比只给链接与定性结论。标成「T4 起步」的参数是按 16GB 改短的上下文，本页没有在这张卡上实测过。</p>
         </article>
       </div>
       <div class="callout ok"><strong>关于 slang：</strong>业界口语里说的 slang，通常指 <strong>SGLang</strong>（Structured Generation Language），常与 vLLM 一起对比的推理引擎。下文一律写 SGLang。</div>
@@ -416,6 +417,7 @@
         <p class="explain" id="arch-note">点上面的按钮，高亮当前要盯的子模块。</p>
       </div>
       <p>推理时「一次前向」就是：读已有 KV（若有）→ 算注意力与 FFN → 写出新 KV → 得到下一个 token 的分布。引擎要优化的，正是成千上万次这样的前向如何共享 GPU。</p>
+      <div class="callout"><strong>演示模型不是纯解码器堆叠。</strong><a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5-9B</a> 的模型卡写明：32 层，排布是 8 ×（3 × Gated DeltaNet → FFN，再 1 × Gated Attention → FFN）。Gated Attention 才是上面这块全注意力；Gated DeltaNet 是线性递推，不按 token 增长 KV。先把经典注意力学扎实，再记住这张卡上的 9B 每 4 层只有 1 层在付全注意力的显存。</div>
     </section>
 
     <section class="chapter" id="attn" data-core="1">
@@ -565,11 +567,13 @@
         </div>
         <label class="got"><input type="checkbox" data-got="infer"> 这节能复述</label>
       </header>
-      <p>适合理解接口；高并发请交给推理引擎。</p>
+      <p>适合看清「tokenizer → 模型 → 下一个 token」这条接口。高并发交给第 17 节的推理引擎。</p>
+      <div class="callout warn"><strong>这段不要在单张 T4 上执行。</strong><a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen/Qwen3.5-9B</a> 的全精度权重，<a href="https://recipes.vllm.ai/Qwen/Qwen3.5-9B">vLLM recipe</a> 标成 BF16 约 22GB，对应单张 24GB 卡。T4 是 16GB，也没有 BF16 张量核。本机可执行的演示是第 17 节的 W4A16。</div>
       <pre><code>from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 
-name = "Qwen/Qwen2.5-0.5B-Instruct"
+# 接口示意。16GB T4 上请不要 from_pretrained 这份全精度权重。
+name = "Qwen/Qwen3.5-9B"
 tok = AutoTokenizer.from_pretrained(name)
 model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16, device_map="auto")
 
@@ -688,7 +692,7 @@ print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
       </header>
       <div class="grid-3">
         <article class="card"><h3>Prefix caching</h3><p>跨请求复用相同 prompt 前缀的 KV。vLLM 可配置开关；与 SGLang 的 Radix 是同一问题的不同实现重心。</p></article>
-        <article class="card"><h3>量化</h3><p>更低位宽存权重或 KV（FP8、AWQ/GPTQ 等），换显存与带宽，需业务验收质量。</p></article>
+        <article class="card"><h3>量化</h3><p>更低位宽存权重或 KV（FP8、W4A16 / AWQ / GPTQ 等），换显存与带宽，需业务验收质量。T4 不支持 FP8；这张卡的 9B 演示用 W4A16。</p></article>
         <article class="card"><h3>Speculative decoding</h3><p>草稿模型提议、目标模型验证，加速 decode。以当前版本文档为准。</p></article>
       </div>
       <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制模型抬吞吐；<strong>EP</strong> 切 MoE expert。</p>
@@ -708,7 +712,7 @@ print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
         <div class="lab-h"><strong>进程数计算器（示意）</strong></div>
         <div class="controls">
           <label class="field">API 副本 <input type="number" id="proc-api" value="1" min="1" max="64"></label>
-          <label class="field">TP size <input type="number" id="proc-tp" value="2" min="1" max="64"></label>
+          <label class="field">TP size <input type="number" id="proc-tp" value="1" min="1" max="64"></label>
           <label class="field">DP 副本 <input type="number" id="proc-dp" value="1" min="1" max="64"></label>
         </div>
         <div class="result scoreline" id="proc-est">—</div>
@@ -729,14 +733,21 @@ print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
         </div>
         <label class="got"><input type="checkbox" data-got="vllm-run"> 这节能复述</label>
       </header>
-      <p>摘自已核实的 <a href="https://docs.vllm.ai/en/latest/getting_started/quickstart.html">Quickstart</a>。环境要求随版本变。</p>
+      <p>安装行来自 <a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5-9B 模型卡</a>（Qwen3.5 需要较新的 vLLM）。环境要求随版本变，落地前再看一次卡片。</p>
       <pre><code>uv venv --python 3.12 --seed
 source .venv/bin/activate
-uv pip install vllm --torch-backend=auto
-vllm download-kernels
+uv pip install vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly</code></pre>
+      <p>单张 T4 的起步用 <a href="https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16">RedHatAI/Qwen3.5-9B-quantized.w4a16</a>：INT4 权重、激活保持原精度，给 vLLM 用。<code>--language-model-only</code> 与 <code>--reasoning-parser qwen3</code> 写在该仓库和模型卡的文本命令里。上下文从 8192 起步，是按 16GB 改短的，不是官方 262144。</p>
+      <pre><code>vllm serve RedHatAI/Qwen3.5-9B-quantized.w4a16 \
+  --served-model-name qwen3.5-9b \
+  --reasoning-parser qwen3 \
+  --language-model-only \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.90 \
+  --max-num-seqs 1
 
-vllm serve Qwen/Qwen2.5-1.5B-Instruct
 curl http://localhost:8000/v1/models</code></pre>
+      <div class="callout warn">8192、0.90、并发 1 是这张 16GB 卡的起步值，本页没有在 T4 上实测。先看 <code>nvidia-smi</code> 的剩余显存，再加长上下文或加大 <code>--max-num-seqs</code>。官方模型卡建议思考任务尽量保持至少 128K 上下文；那条建议在这张卡上做不到，思考质量会受短窗口影响。</div>
       <table>
         <thead><tr><th>配置</th><th>作用</th><th>推荐类比</th></tr></thead>
         <tbody>
@@ -748,11 +759,30 @@ curl http://localhost:8000/v1/models</code></pre>
           <tr><td>prefix caching 开关</td><td>前缀缓存</td><td>公共特征缓存</td></tr>
         </tbody>
       </table>
-      <pre><code>vllm serve meta-llama/Llama-3.1-8B-Instruct \
-  --tensor-parallel-size 2 \
-  --gpu-memory-utilization 0.90 \
-  --max-model-len 8192</code></pre>
-      <div class="callout warn">参数名与默认值请以 <code>vllm serve --help</code> 与 Optimization 页为准。频繁 preemption → 提高 utilization、降并发或加大 TP。</div>
+      <p>对照：模型卡上的全精度文本命令，面向能放下 BF16（recipe 约 22GB）和 262144 上下文的机器。</p>
+      <pre><code>vllm serve Qwen/Qwen3.5-9B \
+  --tensor-parallel-size 1 \
+  --max-model-len 262144 \
+  --reasoning-parser qwen3 \
+  --language-model-only</code></pre>
+      <pre><code>from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY")
+resp = client.chat.completions.create(
+    model="qwen3.5-9b",
+    messages=[{"role": "user", "content": "用一句话解释 KV cache"}],
+    max_tokens=256,
+    temperature=0.7,
+    top_p=0.8,
+    presence_penalty=1.5,
+    extra_body={
+        "top_k": 20,
+        "chat_template_kwargs": {"enable_thinking": False},
+    },
+)
+print(resp.choices[0].message.content)</code></pre>
+      <p>非思考模式的温度来自模型卡的 Instruct 建议：<code>temperature=0.7</code>、<code>top_p=0.8</code>、<code>top_k=20</code>、<code>presence_penalty=1.5</code>。Qwen3.5 默认会先写思考过程；关掉它用 <code>chat_template_kwargs.enable_thinking = false</code>。模型卡写明不支持 Qwen3 的 <code>/think</code>、<code>/nothink</code> 软开关。</p>
+      <div class="callout warn">参数名与默认值请以 <code>vllm serve --help</code> 与 Optimization 页为准。频繁 preemption → 提高 utilization、降并发。这张机器只有一张卡，TP 保持 1。</div>
     </section>
 
     <section class="chapter" id="sglang" data-core="1">
@@ -797,22 +827,32 @@ curl http://localhost:8000/v1/models</code></pre>
         </div>
         <label class="got"><input type="checkbox" data-got="sglang-run"> 这节能复述</label>
       </header>
-      <p>来自已核实的 <a href="https://docs.sglang.ai/get_started/install.html">Install</a> 与 <a href="https://docs.sglang.io/docs/get-started/quickstart">Quickstart</a>。文档同时出现 <code>sglang serve</code> 与 <code>python3 -m sglang.launch_server</code>；以本机 <code>--help</code> 为准。示例端口多为 <strong>30000</strong>。</p>
+      <p>Qwen3.5 的模型卡要求 SGLang 用主分支，并用 <code>python -m sglang.launch_server</code>。下面是卡片上的文本服务命令，上下文 262144，面向能放下全精度权重的机器。</p>
       <pre><code>uv venv --python 3.12
 source .venv/bin/activate
-uv pip install --prerelease=allow sglang
+uv pip install 'git+https://github.com/sgl-project/sglang.git#subdirectory=python&amp;egg=sglang[all]'
 
-sglang serve MODEL_PATH --host 0.0.0.0 --port 30000
-
-curl http://localhost:30000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"MODEL_PATH","messages":[{"role":"user","content":"What is the capital of France?"}]}'</code></pre>
-      <pre><code>import openai
-client = openai.Client(base_url="http://127.0.0.1:30000/v1", api_key="None")
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3.5-9B \
+  --port 8000 \
+  --tp-size 1 \
+  --mem-fraction-static 0.8 \
+  --context-length 262144 \
+  --reasoning-parser qwen3</code></pre>
+      <div class="callout warn"><strong>单张 T4 不要照抄 262144 和全精度仓库。</strong>这张卡先把第 17 节的 vLLM W4A16 跑通。SGLang 实验把 <code>--context-length</code> 降到能启动的值（可从 8192 试）。若当前版本加载不了这份混合架构或 W4A16，把报错原文留在周记里。模型卡对照表里的 Qwen3.5-4B 可以用来把前缀实验做完；那是另一条显存预算，延迟不要和 9B 画在一起。</div>
+      <pre><code>from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY")
 resp = client.chat.completions.create(
-    model="qwen/qwen2.5-0.5b-instruct",
-    messages=[{"role":"user","content":"List 3 countries and their capitals."}],
-    temperature=0, max_tokens=64,
+    model="Qwen/Qwen3.5-9B",
+    messages=[{"role": "user", "content": "用一句话解释前缀缓存"}],
+    max_tokens=256,
+    temperature=0.7,
+    top_p=0.8,
+    presence_penalty=1.5,
+    extra_body={
+        "top_k": 20,
+        "chat_template_kwargs": {"enable_thinking": False},
+    },
 )
 print(resp.choices[0].message.content)</code></pre>
       <div class="callout ok">
@@ -894,37 +934,37 @@ print(resp.choices[0].message.content)</code></pre>
       <div class="grid-2">
         <article class="card">
           <h3>周 1 · 概念对齐</h3>
-          <p>讲清 prefill/decode、KV、continuous batching、TTFT/TPOT。画推荐↔推理对照表。读 Red Hat 文前半与 vLLM PagedAttention 博客。</p>
+          <p>讲清 prefill/decode、KV、continuous batching、TTFT/TPOT。读 Qwen3.5-9B 模型卡的层排布：32 层里只有 1/4 是全注意力。画出 16GB 预算：BF16 约 22GB 放不下，演示走 W4A16 文本。</p>
         </article>
         <article class="card">
-          <h3>周 2 · 跑通 vLLM</h3>
-          <p>Quickstart + curl / OpenAI SDK。试 max-model-len、gpu-memory-utilization。用业务风格 prompt 跑 100 次记 TTFT。</p>
+          <h3>周 2 · 在 T4 上跑通 vLLM</h3>
+          <p>按第 17 节拉起 W4A16，<code>language-model-only</code>，上下文从 8192、并发从 1 起步。先打一条 <code>enable_thinking: false</code> 的短请求，确认 OpenAI 接口。</p>
         </article>
         <article class="card">
-          <h3>周 3 · 压测</h3>
-          <p>固定长度扫并发；观察 preemption。输出「并发 vs TTFT p95 vs tok/s」。读 Optimization 文档。</p>
+          <h3>周 3 · 这张卡的压测</h3>
+          <p>固定短 prompt，并发只扫 1、2、4。记录自己的 TTFT 与是否 preemption。上下文加长前先看剩余显存。不把官方 128K 思考窗口当作这张卡的目标。</p>
         </article>
         <article class="card">
-          <h3>周 4 · SGLang + 前缀</h3>
-          <p>Quickstart；共享 system 多会话；开关 radix/prefix 对比 TTFT。读 LMSYS Radix 博客。</p>
+          <h3>周 4 · 前缀复用</h3>
+          <p>共享一条长 system prompt，只改 user。vLLM 看 prefix caching；SGLang 能启动再看 radix。加载的若是 Qwen3.5-4B 或其他权重，单独画图，不和 9B 的延迟比。</p>
         </article>
         <article class="card">
-          <h3>周 5 · 对比选型</h3>
-          <p>同硬件同流量回放两引擎；一页纸选型（含「仍需复测」）。读 Red Hat 全文与 Baseten §4.3。</p>
+          <h3>周 5 · 同一张 T4 上选型</h3>
+          <p>两引擎都用实际能加载的 checkpoint、同一批短请求。一页纸写明模型名、量化、上下文、引擎版本。读 Red Hat 全文与 Baseten §4.3。</p>
         </article>
         <article class="card">
           <h3>周 6 · 进阶（可选）</h3>
-          <p>TP 多卡；接网关超时/限流/监控；故障手册含 OOM、排队、冷启动。</p>
+          <p>打开一次思考模式，把 <code>max_tokens</code> 限制住，对比非思考的总长度。再写网关超时与 OOM 手册。多卡 TP 留到有第二张卡；换 24GB 卡时再考虑 BF16 和更长上下文。</p>
         </article>
       </div>
       <h3>练习六件事（可打卡）</h3>
       <ol>
-        <li>手算或口述一遍注意力公式与因果掩码</li>
-        <li>用估算器感受 KV 随并发/长度膨胀</li>
-        <li>本地 <code>vllm serve</code> + 一次 chat completions</li>
-        <li>本地 <code>sglang serve</code> + 一次 chat completions</li>
-        <li>构造高前缀重叠流量，对比缓存开/关</li>
-        <li>写一页「推荐指标 ↔ 推理指标 ↔ 告警阈值」草案</li>
+        <li>口述注意力公式，并说出 Qwen3.5-9B 每 4 层里只有 1 层是全注意力</li>
+        <li>用估算器感受 KV 随并发/长度膨胀，对照 T4 的 16GB</li>
+        <li>在 T4 上用 W4A16 拉起 vLLM，非思考模式打通一次 chat completions</li>
+        <li>同一服务再开一次思考模式，限制 <code>max_tokens</code>，对比回复长度</li>
+        <li>构造高前缀重叠流量，对比缓存开/关，并写上实际加载的模型名</li>
+        <li>写一页「16GB 怎么分给权重和 KV」以及告警阈值草案</li>
       </ol>
       <div class="callout">每周五输出一页纸（指标图 + 结论 + 下周问题）。验收附引擎版本、GPU、完整启动命令。</div>
     </section>
@@ -963,6 +1003,10 @@ print(resp.choices[0].message.content)</code></pre>
         <p class="explain">长度分布、前缀重叠、是否流式、精度、是否默认配置都不同。无共享前缀的榜会低估 radix/prefix。</p></div>
       <div class="q"><strong>Q. OpenAI SDK 能直接打两家吗？</strong>
         <p class="explain">可以。改 base_url 与 model 名即可。注意 chat template / tool call 细节仍可能有差异，以各引擎文档为准。</p></div>
+      <div class="q"><strong>Q. 模型卡写了 262144，这张 T4 为什么用 8192？</strong>
+        <p class="explain">262144 是 Qwen3.5-9B 的原生上下文，模型卡还建议思考任务尽量保持至少 128K。vLLM recipe 把 BF16 放在约 22GB、单张 24GB 卡上。T4 是 16GB，且不支持 FP8。全精度和长上下文会在加载权重或分配 KV 时失败。这张卡用 W4A16 文本权重，上下文从 8192 往上试。</p></div>
+      <div class="q"><strong>Q. 第一次请求为什么关掉思考？</strong>
+        <p class="explain">Qwen3.5 默认先写思考再回答，短问题也会吐出很长的 reasoning，把 8192 的窗口和 T4 的剩余显存吃掉。打通接口时用 enable_thinking: false。确认服务稳定后，再单独开一次思考，并限制 max_tokens。</p></div>
     </section>
 
     <section class="chapter" id="glossary">
@@ -992,14 +1036,16 @@ print(resp.choices[0].message.content)</code></pre>
         <li>vLLM：<a href="https://docs.vllm.ai/">docs.vllm.ai</a> · <a href="https://blog.vllm.ai/2023/06/20/vllm.html">PagedAttention 博客</a> · <a href="https://vllm.ai/blog/2025-09-05-anatomy-of-vllm">Anatomy</a> · <a href="https://github.com/vllm-project/vllm">GitHub</a></li>
         <li>SGLang：<a href="https://docs.sglang.ai/">docs.sglang.ai</a> · <a href="https://docs.sglang.io/">docs.sglang.io</a> · <a href="https://lmsys.org/blog/2024-01-17-sglang/">LMSYS Radix 博客</a> · <a href="https://github.com/sgl-project/sglang">GitHub</a></li>
         <li>对比：<a href="https://developers.redhat.com/articles/2026/10/14/vllm-vs-sglang-choosing-the-right-inference-engine-for-your-workload">Red Hat 2026-10-14</a> · <a href="https://www.baseten.co/inference-engineering/book/04-software/inference-engines/">Baseten Inference Engines</a></li>
+        <li>演示模型：<a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen/Qwen3.5-9B</a> · <a href="https://recipes.vllm.ai/Qwen/Qwen3.5-9B">vLLM recipe</a>（BF16 约 22GB，FP8 约 11GB，单张 24GB） · <a href="https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16">RedHatAI W4A16</a></li>
+        <li>T4 与 FP8：<a href="https://docs.redhat.com/en/documentation/red_hat_ai/3/html/supported_product_and_hardware_configurations/rhaiis-supported-ai-accelerators_supported-configurations">Red Hat AI 加速器表</a>写明 NVIDIA T4 不支持 FP8（W8A8）</li>
       </ul>
       <div class="callout warn">
-        <strong>需再核对：</strong>SGLang 双文档域；启动入口 <code>sglang serve</code> vs <code>launch_server</code>；CUDA/Python 下限与默认 utilization 随发行版变化。公开 benchmark 数字请打开原文，本页不固化转录。
+        <strong>需再核对：</strong>Qwen3.5 的 vLLM / SGLang 安装行指向 nightly 或主分支，版本每周都可能变。T4 上的 8192 与并发 1 没有在本机实测。SGLang 能否加载这份 W4A16 或混合架构，以当时的报错为准。公开 benchmark 数字请打开原文，本页不固化转录。
       </div>
     </section>
 
     <footer>
-      <p>整合版：参考页交互与纸质侧栏视觉 + 推荐对照 / SGLang / 选型 / 网关监控 / 学习路线。日期 2026-10-15。</p>
+      <p>整合版：参考页交互与纸质侧栏视觉 + 推荐对照 / SGLang / 选型 / 网关监控 / 学习路线。单张 T4 上的演示模型改为 Qwen3.5-9B W4A16。日期 2026-10-16。</p>
       <p>文件：<code>/workspace/vllm-sglang-learning-handbook.html</code></p>
     </footer>
   </main>
@@ -1343,7 +1389,8 @@ print(resp.choices[0].message.content)</code></pre>
     { q: '口语 slang 在本手册指？', opts: ['Shell 别名', 'SGLang 推理引擎', 'Python ast', 'Slack 机器人'], a: 1, why: 'Structured Generation Language，常与 vLLM 对比。' },
     { q: '公开榜几乎无共享前缀时，可能？', opts: ['高估 radix/prefix 收益', '低估 radix/prefix 收益', '不影响', '只影响训练'], a: 1, why: '前缀复用场景的收益不会体现在无重叠流量上。' },
     { q: 'Continuous batching 允许？', opts: ['请求中途加入、完成即离开', '必须等齐固定 batch', '禁止流式', '只能单卡'], a: 0, why: '每 iteration 重组成 batch，提高 GPU 利用率。' },
-    { q: '把推理接到推荐网关，优先？', opts: ['重写全部客户端协议', 'OpenAI Compatible base_url', '只能 gRPC 自研', '必须同进程嵌入排序'], a: 1, why: '两引擎都提供 OpenAI 兼容 HTTP，改 base_url 即可起步。' }
+    { q: '把推理接到推荐网关，优先？', opts: ['重写全部客户端协议', 'OpenAI Compatible base_url', '只能 gRPC 自研', '必须同进程嵌入排序'], a: 1, why: '两引擎都提供 OpenAI 兼容 HTTP，改 base_url 即可起步。' },
+    { q: '单张 16GB T4 上跑 Qwen3.5-9B，起步用？', opts: ['照抄官方 BF16 与 262144 上下文', 'W4A16 文本权重，上下文从短窗口试', '打开 FP8，因为 T4 支持', '两张卡做张量并行'], a: 1, why: 'recipe 把 BF16 标成约 22GB。T4 是 16GB 且不支持 FP8。这张卡用 W4A16，并把上下文降到能启动的长度。' }
   ];
   const quizBox = $('#quiz-box');
   $('#quiz-total').textContent = questions.length;
@@ -1406,7 +1453,11 @@ print(resp.choices[0].message.content)</code></pre>
     ['Chunked Prefill', '把长 prefill 切块与 decode 交错调度。'],
     ['Preemption', 'KV 不够时抢占请求释放显存，之后可能重算。'],
     ['GQA / MQA', '分组/多查询注意力，减少 KV 头数以省显存。'],
-    ['OpenAI Compatible', '提供 /v1/chat/completions 一类 HTTP 接口。']
+    ['OpenAI Compatible', '提供 /v1/chat/completions 一类 HTTP 接口。'],
+    ['Qwen3.5-9B', '本手册的演示模型。32 层混合结构：每 4 层中 3 层 Gated DeltaNet、1 层全注意力。'],
+    ['Gated DeltaNet', 'Qwen3.5 里的线性递推层，不按 token 增长 KV。'],
+    ['W4A16', '权重 4 bit、激活 16 bit。T4 上用来放下 Qwen3.5-9B。'],
+    ['Thinking mode', 'Qwen3.5 默认先生成思考再回答。关掉用 chat_template_kwargs.enable_thinking = false。']
   ];
   const gloss = $('#gloss-list');
   function renderGloss(filter='') {
