@@ -20,6 +20,20 @@
 
 W4A16 不意味着所有参数恰好 4bit。这份 checkpoint 的量化 `ignore` 包含 GDN 部分线性层、Embedding、LM Head 和视觉模块等。仅用 `9B × 0.5 字节` 会低估权重占用。`--language-model-only` 限制多模态路径，但不能据此凭空推断具体显存节省值。
 
+按固定 revision 各分片 safetensors 头逐个求和（只读文件头，不是 GPU 实测）：
+
+| 部分 | 字节 | 存储 |
+| --- | --- | --- |
+| 24 层 GDN 线性层 | 3.24 GB | 16 位，未量化 |
+| 32 层 FFN | 2.49 GB | INT4，group 128 |
+| LM Head | 2.03 GB | 16 位，未量化 |
+| Embedding | 2.03 GB | 16 位，未量化 |
+| 8 层全注意力 | 0.24 GB | INT4 |
+| **语言模型合计** | **10.04 GB（9.35 GiB）** | |
+| 视觉塔 / MTP | 0.91 / 0.49 GB | 文本服务通常不加载 |
+
+`--gpu-memory-utilization 0.85` 在约 15 GiB 可见容量上的预算是 12.75 GiB。扣掉 9.35 GiB 权重，留给 KV、GDN 状态、激活与工作区的只有约 3.4 GiB。这也是起步上下文与并发都设得很保守的原因。
+
 **三个检查分别完成：** 权重能放下；量化加载/矩阵乘内核支持 SM75；GDN 与普通注意力内核支持当前 dtype 和 GPU。普通注意力后端开关不会自动修复 GDN 的内核问题。若 FP16 下出现 NaN 或异常输出，也不能把它当成正常模型质量。
 
 ## 2. 先确认容器能用 GPU
@@ -146,6 +160,8 @@ python3 examples/stream-bench.py --shared-prefix --requests 12 --concurrency 1 \
 ```
 
 脚本把资料放在固定 system 消息里，只在 user 后缀改变编号。`--prefix-lines` 调整资料行数，不是精确 token 数；根据 usage 的 `prompt_tokens` 控制输入 + 输出长度。不能把随机编号放在 system 最前面，再期待后面相同片段仍命中。
+
+**先查块大小。** vLLM 的 APC 只缓存写满的块。Qwen3.5 是混合模型，一页 KV 要能装下一层 GDN 状态（config 指定递推状态为 FP32，约 2.05 MiB），所以块大小会被调大：按 v0.18.1 源码，不开前缀缓存时是 16 × ⌈2.05 MiB ÷ (16 × 4 KiB)⌉ = 528 token，开了前缀缓存还可能再调。以启动日志的 `Setting attention block size to N tokens` 为准，再让共享 system 段明显长于 N；命中长度会是 N 的整数倍，user 后缀基本不会命中。
 
 **Qwen3.5 特有的检查：** vLLM 不只要缓存 8 层全注意力 KV，还需可复用的 GDN 状态。v0.18.1 的 Mamba 缓存模式包含 `none/all/align`；自动选择和模型支持约束要看实际启动日志，而不是只看到命令里有 `--enable-prefix-caching` 就认定全部生效。对照 `/metrics` 的 prefix cache 查询/命中指标；若功能被禁用、没有命中或请求过短，记录限制，不能强行解释为缓存算法无效。
 
