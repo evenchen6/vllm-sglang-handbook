@@ -253,6 +253,9 @@
   .tape .cell.prompt { background: var(--gold-soft); }
   .tape .cell.gen { background: var(--teal-soft); border-color: var(--teal); }
   .tape .cell.wait { opacity: .35; }
+  .tape .cell.calc { background: var(--copper-soft); border-color: var(--copper); opacity: 1; }
+  .tape .cell.keep { background: var(--teal-soft); border-color: var(--teal); opacity: 1; }
+  .tape .cell.pool { background: var(--gold-soft); border-color: var(--gold); opacity: 1; }
   .groups { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; }
   .group { display: grid; gap: 4px; }
   .group em { font-style: normal; font-size: 11px; color: var(--muted); text-align: center; }
@@ -294,7 +297,7 @@
     <a class="core" href="#attn"><small>05</small>注意力</a>
     <a class="core" href="#generation"><small>05A</small>token 到输出</a>
     <a href="#families"><small>06</small>三种家族</a>
-    <a class="core" href="#kv"><small>07</small>KV cache</a>
+    <a class="core" href="#kv"><small>07</small>KV 生命周期</a>
     <a class="core" href="#prefill"><small>08</small>Prefill / Decode</a>
     <div class="nav-group">HF 与为何要引擎</div>
     <a class="core" href="#hf"><small>09</small>Transformers 库</a>
@@ -326,9 +329,10 @@
       <div>
         <p class="eyebrow">学习手册</p>
         <h1>从 Transformer 到 vLLM / SGLang</h1>
-        <p class="lede">先看清模型怎么算，再看 Hugging Face Transformers 怎么加载权重，最后看 vLLM 与 SGLang 怎么把同一份权重做成高吞吐推理服务——并对照推荐后台熟悉的 QPS、缓存与批处理语言。</p>
+        <p class="lede">先看清模型怎么算，再把 KV Cache 从公式算到显存账，然后看 Hugging Face Transformers 怎么加载权重，最后看 vLLM 与 SGLang 怎么把同一份权重做成高吞吐推理服务——并对照推荐后台熟悉的 QPS、缓存与批处理语言。</p>
         <ul class="meta">
           <li>文档核对日期 2026-10-17</li>
+          <li>同日按 zero-to-sglang 第 4 章加深 KV</li>
           <li>读者：推荐架构后台</li>
           <li>演示机：单张 NVIDIA T4，16GB</li>
           <li>主模型：Qwen3.5-9B（W4A16 权重 / FP16 激活 / 文本）</li>
@@ -553,29 +557,49 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <span class="num">07</span>
         <div>
           <p class="eyebrow">显存</p>
-          <h2>KV cache 为什么贵</h2>
+          <h2>KV Cache 的账：存什么、怎么涨、何时还</h2>
         </div>
         <label class="got"><input type="checkbox" data-got="kv"> 这节能复述</label>
       </header>
-      <p>对于普通因果注意力，不带 cache 的朴素生成循环会反复处理全部历史。有了 cache，decode 只计算新输入位置的投影与层变换，并用新的 Q 读取历史 K/V。KV 缓存不等于完整回答缓存。</p>
+      <p>对于普通因果注意力，不带 cache 的朴素生成循环会反复处理全部历史。有了 cache，decode 只计算新输入位置的投影与层变换，并用新的 Q 读取历史 K、V。KV 缓存不等于完整回答缓存。这一节按 Datawhale《zero-to-sglang》<a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第4章_推理的核心数据结构入门.html">第 4 章「推理的核心数据结构」</a>的问题来写：缓存从哪来、一次请求怎么用它、显存怎么估算、多请求时连续分配为什么撑不住。手算矩阵和章末题在原文，本页不转载正文。</p>
+      <h3>留下的是每层的 K 和 V</h3>
+      <p>进注意力之前，当前位置的隐藏状态各自乘出 Q、K、V。Q 表示这一步想从上下文里取什么，K 是每个历史位置用来打分的特征，V 是被加权汇总的内容。各层权重不同，所以每一层各存各的。</p>
       <ul>
-        <li>随<strong>序列长度</strong>线性增长（每层、每 token 存 K 与 V）</li>
-        <li>无共享时随<strong>活跃序列数</strong>近似线性增长；前缀共享、滑动窗口与混合状态会改变实际分配</li>
-        <li>输出长度事先不知道，传统连续预留易碎片与浪费。vLLM 介绍博客称早期系统因碎片与过度预留浪费约 60%–80% 相关内存。<a class="cite" href="https://blog.vllm.ai/2023/06/20/vllm.html">vLLM 博客 2023</a></li>
+        <li><strong>Prefill</strong>：整段 prompt 一次算出全部 token 的 Q、K、V，把每层的 K、V 写进这条请求的缓存，再做带因果掩码的注意力。预测第一个新 token 只用最后一个位置的隐藏状态。</li>
+        <li><strong>Decode</strong>：采样得到的是 token id。下一步把这个 id 重新 embedding，再投影出本步的 q、k、v，把 k、v 接到历史缓存后面。q 和全部 K 做注意力，再对全部 V 加权。Q 用完即弃，下一步不会复用它。</li>
+        <li>注意力之后，这个新位置还要走输出投影、残差、归一化和 FFN。整层走完，最后一层隐藏状态进 LM Head，得到词表上的 logits。</li>
+        <li>随<strong>序列长度</strong>线性增长（每层、每 token 存 K 与 V）。无共享时随<strong>活跃序列数</strong>近似线性增长；前缀共享、滑动窗口与混合状态会改变实际分配。</li>
       </ul>
+      <div class="callout"><strong>和激活的差别：</strong>中间激活算完就可以复用那块显存。KV 要跨过后面的每一个 decode step 留着，并按层、按 token 增长。所以长上下文和多请求并发时，KV 会从「比权重小」变成显存的大头。</div>
+      <div class="lab" id="life-lab">
+        <div class="lab-h">
+          <strong>一次请求 · 拖动看缓存里留下什么</strong>
+          <span class="explain" id="life-label">1 / 7</span>
+        </div>
+        <p class="explain">上排是这一步新算的量，下排是缓存里留下的页。铜色是本步新算，绿色是已经写下的 K、V。</p>
+        <div class="tape" id="life-now"></div>
+        <div class="tape" id="life-cache" style="margin-top:8px"></div>
+        <label class="scrub">请求走到哪
+          <input type="range" id="life-range" min="0" max="6" value="0" step="1" aria-label="KV 生命周期步骤">
+        </label>
+        <p class="explain" id="life-note"></p>
+      </div>
       <div class="lab">
-        <div class="lab-h"><strong>KV 示意：点 token 看「已缓存」格子</strong></div>
+        <div class="lab-h"><strong>点 token，看已写入的 K、V</strong></div>
         <div class="tokens" id="kv-tokens"></div>
         <div class="kv" id="kv-slots" aria-label="KV 槽位"></div>
-        <p class="explain">推荐类比：特征缓存若按「最大特征维 × 最大并发」整块预留会浪费；后面的 PagedAttention 像把缓存切成页按需分配。</p>
+        <p class="explain">格子里写的是 K 和 V。Q 不占这些槽。推荐类比：若按「最大长度 × 最大并发」整块预留，没生成的 token 也会占住显存。</p>
       </div>
+      <h3>三笔账：Prefill、单步、生成之后</h3>
+      <p>各请求长度一样时，理论稠密占用是 <code>2 × L × n<sub>kv</sub> × d × tokens × B × 每元素字节</code>。前面的 2 是 K 和 V 两份。tokens 在 prefill 结束时是输入长度 T，生成了 l 个 token 之后是 T+l。长度不一样时，把 B×tokens 换成各请求长度之和。前缀缓存命中会让真实写入小于这个数；这里先不算命中。</p>
       <div class="lab">
         <div class="lab-h"><strong>KV 字节估算器（教学公式，非引擎实测）</strong></div>
         <div class="controls">
           <label class="field">全注意力层数 L <input type="number" id="kv-L" value="8" min="1" max="256"></label>
           <label class="field">KV 头数 <input type="number" id="kv-H" value="4" min="1" max="128"></label>
           <label class="field">头维 d <input type="number" id="kv-D" value="256" min="1" max="512"></label>
-          <label class="field">序列长 S <input type="number" id="kv-S" value="8192" min="1" max="1000000"></label>
+          <label class="field">输入长度 T <input type="number" id="kv-S" value="8192" min="1" max="1000000"></label>
+          <label class="field">已生成 l <input type="number" id="kv-G" value="128" min="0" max="1000000"></label>
           <label class="field">并发 B <input type="number" id="kv-B" value="1" min="1" max="4096"></label>
           <label class="field">字节/元素
             <select id="kv-bytes"><option value="2">FP16/BF16 (2)</option><option value="1">FP8/INT8 (1)</option><option value="4">FP32 (4)</option></select>
@@ -585,12 +609,43 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
           <label class="field">容量基准 GiB（按 nvidia-smi 修改）<input type="number" id="kv-cap" value="15" min="1" max="256" step="0.1"></label>
           <label class="field">权重 + 状态 + 其他开销 GiB（实测后填）<input type="number" id="kv-fixed" value="0" min="0" max="256" step="0.1"></label>
         </div>
-        <label class="scrub">序列长度（拖动，和上面的 S 同步）
-          <input type="range" id="kv-range" min="256" max="262144" step="256" value="8192" aria-label="序列长度">
+        <label class="scrub">输入长度 T（拖动，和上面的 T 同步）
+          <input type="range" id="kv-range" min="256" max="262144" step="256" value="8192" aria-label="输入长度">
         </label>
+        <div class="grid-3">
+          <article class="mini"><h3>Prefill 结束</h3><p class="scoreline" id="kv-prefill">—</p></article>
+          <article class="mini"><h3>Decode 每步新增</h3><p class="scoreline" id="kv-step">—</p></article>
+          <article class="mini"><h3>再生成 l 个之后</h3><p class="scoreline" id="kv-total">—</p></article>
+        </div>
         <div class="meter" aria-hidden="true"><i id="kv-meter"></i></div>
         <div class="result scoreline" id="kv-est">—</div>
-        <p class="explain">默认填的是 Qwen3.5-9B 模型卡上的全注意力：8 层、4 个 KV 头、头维 256。公式 <code>2 × L × H × d × S × B × bytes</code> 只算这些层的 K 和 V。另外 24 层 Gated DeltaNet 不按 token 这样涨。T4 标称 16GB，nvidia-smi 可见容量常约 15GiB，以实际读数为准。固定开销填 0 时只看 KV；GDN 状态、权重、临时工作区、缓存池对齐和 CUDA Graph 都不在此公式内，理论合计也不等于实测峰值。</p>
+        <p class="explain">默认是 <a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5-9B</a> 模型卡上的全注意力：8 层、4 个 KV 头、头维 256。公式 <code>2 × L × n<sub>kv</sub> × d × tokens × B × bytes</code> 只算这些层的 K 和 V。另外 24 层 Gated DeltaNet 不按 token 这样涨。容量基准默认 15 GiB，贴近 T4 上 nvidia-smi 常见的可见容量，请改成自己的读数。固定开销填 0 时只看 KV；GDN 状态、权重、临时工作区、缓存池对齐和 CUDA Graph 都不在此公式内，理论合计也不等于实测峰值。长度默认相同；真实请求要用各请求长度之和。</p>
+        <p class="explain">对一下原文例题：把 L、KV 头、头维、T、l、B 改成 36、8、128、100、0、1，字节选 BF16。Prefill 与「再生成 l 个之后」都应约为 14.06 MiB，每步新增显示 144.0 KiB（约 0.14 MiB）。滑条从 256 起步，这一题改数字框；再拖滑条会把 T 吸到 256 的倍数。那一章用的是 Qwen3-4B-Thinking-2507，不是本页默认的 9B。</p>
+      </div>
+      <h3>一次请求的生命周期</h3>
+      <ol>
+        <li><strong>分配。</strong>为这条请求准备可写的位置。引擎里的单位是固定大小的 block / page，按生成进度领取。</li>
+        <li><strong>Prefill 写入。</strong>prompt 每个 token 的 K、V 按层写入。前缀已经在缓存里时，命中的那段可以跳过重算。</li>
+        <li><strong>Decode 读取并追加。</strong>每步读历史 K、V，只把新 token 的 K、V 接上去。Q 不进入缓存。</li>
+        <li><strong>结束。</strong>遇到 EOS、长度上限或取消，就减少这些页的引用计数。降到 0 归还 GPU 上的空闲池。开了前缀缓存或 RadixAttention 时，后来的请求还能命中的页会继续被引用，直到按策略淘汰。</li>
+      </ol>
+      <h3>多请求时，连续大数组为什么不够</h3>
+      <p>单请求用一块连续张量存 KV，分配和追加都好讲。在线服务里请求长度和寿命都不一样，还要中途加入、完成离开。这时仍按请求划一块连续显存，会碰到四件事：</p>
+      <div class="grid-2">
+        <article class="card"><h3>碎片和预留</h3><p>按最大上下文预留，没生成的 token 先占住显存。动态分配又会留下对不上的空洞。连续区域要扩容时，还可能重新分配并拷贝。vLLM 介绍博客称早期系统因此浪费约 60%–80% 相关内存。<a class="cite" href="https://blog.vllm.ai/2023/06/20/vllm.html">vLLM 博客 2023</a></p></article>
+        <article class="card"><h3>前缀存了多份</h3><p>多条请求常带同一段 system prompt。各自一块缓存，就会重复保存同一段 K、V。公共前缀越长，重复占用越大。</p></article>
+        <article class="card"><h3>调度和回收绑在一起</h3><p>加入、退出、抢占、恢复都要同时改容量、地址和优先级。缓存一分散或需要搬家，元数据开销就上来了。</p></article>
+        <article class="card"><h3>和连续批处理打架</h3><p>每一步都要能插入新请求、移除已完成请求。若内核只吃规整的矩形张量，就要按最长序列填充；若为了紧凑而重排，就要 gather 或搬移。</p></article>
+      </div>
+      <p>所以 KV 不能只当成「每条请求一块越长越大的连续张量」。第 13 节的 PagedAttention 把页按需映射；第 18 节的 RadixAttention 再把相同前缀收成一棵树。物理页仍在 GPU 上，两件事解决的是不同问题。</p>
+      <div class="callout ok">
+        <strong>读原文。</strong>推导、图和五道自测在第 4 章。本手册只对齐问题并自己做了估算器，不转载正文。课程许可是 CC BY-NC-SA 4.0，仍在更新，以仓库目录为准。
+        <ul>
+          <li><a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第4章_推理的核心数据结构入门.html">第 4 章 推理的核心数据结构入门</a></li>
+          <li>仓库 <a href="https://github.com/datawhalechina/zero-to-sglang">datawhalechina/zero-to-sglang</a></li>
+          <li>同一套课：<a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第2章_推理入门.html">第 2 章 推理入门</a>、<a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第5章_Benchmark入门.html">第 5 章 Benchmark</a></li>
+          <li>想看代码，读 Part II：<a href="https://datawhalechina.github.io/zero-to-sglang/ch/part2/第1章_mini-sglang：推理引擎长什么样.html">引擎长什么样</a>、<a href="https://datawhalechina.github.io/zero-to-sglang/ch/part2/第4章_KVCache优化.html">KV Cache 优化</a>、<a href="https://datawhalechina.github.io/zero-to-sglang/ch/part2/第8章_RadixAttention与前缀缓存.html">RadixAttention</a></li>
+        </ul>
       </div>
     </section>
 
@@ -626,6 +681,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         </article>
       </div>
       <p class="explain">图中 4 个 prompt 位置在第一次前向统一处理，同时得到首个新 token；新 token 自身的 KV 在下一次前向才计算。动画只表示先后顺序，不表示各阶段耗时相同。客户端 TTFT 还包含网络、排队、预处理与回传；ITL 是 token 间隔，TPOT 是请求级平均，不能把任意 SSE 分块当成单个 token。</p>
+      <div class="callout"><strong>下一步的输入是 token id。</strong>Prefill 用最后一个位置的隐藏状态选出第一个新 token。Decode 再把这个 token id 做 embedding，投影出新的 q、k、v，只把 k、v 追加进第 7 节的缓存。上一步的隐藏状态不会被原样送回模型。</div>
       <table>
         <thead><tr><th>指标</th><th>含义</th><th>推荐类比</th></tr></thead>
         <tbody>
@@ -710,7 +766,7 @@ docker run --rm --gpus device=0 --ipc=host \
           </ul>
         </article>
       </div>
-      <p>这里比较的是朴素封装，非 Transformers 今天全部能力。vLLM 与 SGLang 的起源优化点不同：前者先攻「装下更多请求」，后者先攻「相关请求少算重复前缀」（Red Hat 概括）。</p>
+      <p>这四项正好对应第 7 节的连续 KV：预留浪费、前缀重复、回收复杂、变长请求难拼成矩形 batch。这里比较的是朴素封装，非 Transformers 今天全部能力。vLLM 与 SGLang 的起源优化点不同：前者先攻「装下更多请求」，后者先攻「相关请求少算重复前缀」（Red Hat 概括）。</p>
     </section>
 
     <section class="chapter" id="page" data-core="1">
@@ -722,7 +778,7 @@ docker run --rm --gpus device=0 --ipc=host \
         </div>
         <label class="got"><input type="checkbox" data-got="page"> 这节能复述</label>
       </header>
-      <p><a href="https://docs.vllm.ai/">vLLM</a> 把每条序列的 KV 切成固定大小 block，物理上不必连续，用 block table 映射——类比操作系统分页。按生成进度按需分配，减少过度预留与碎片。<a class="cite" href="https://blog.vllm.ai/2023/06/20/vllm.html">介绍博客</a></p>
+      <p>第 7 节里那块随序列变长的连续 KV，在这里被切成固定大小的 block。物理上不必连续，用 block table 映射——类比操作系统分页。按生成进度按需分配，减少过度预留与碎片。<a class="cite" href="https://blog.vllm.ai/2023/06/20/vllm.html">介绍博客</a> · <a class="cite" href="https://docs.vllm.ai/">vLLM 文档</a></p>
       <div class="lab">
         <div class="lab-h">
           <strong>内存实验室：每格一页，每页 4 个 token</strong>
@@ -948,8 +1004,8 @@ python3 examples/stream-bench.py \
     <section class="chapter" id="path" data-core="1">
       <header class="ch-h"><span class="num">22</span><div><p class="eyebrow">边体验边学习</p><h2>4–6 周：围绕 Qwen3.5 完成六个实验</h2></div></header>
       <div class="grid-2">
-        <article class="card"><h3>周 1 · 真实问答与基本链路</h3><p>先尝试 9B W4A16 非思考模式，观察中文输出。讲清 token/template、logits/采样与首 token；对照普通注意力和 Qwen3.5 的 GDN，不要求一开始推导 GDN。</p></article>
-        <article class="card"><h3>周 2 · 前向与显存</h3><p>可选用同代 4B 跑 5 步前向观测，比较有无 cache 的输入长度。记录 nvidia-smi 可见容量、权重、普通 KV 与 GDN 状态，区分模型加载 OOM 和运行 OOM。</p></article>
+        <article class="card"><h3>周 1 · 真实问答与基本链路</h3><p>先尝试 9B W4A16 非思考模式，观察中文输出。讲清 token/template、logits/采样与首 token；对照普通注意力和 Qwen3.5 的 GDN，不要求一开始推导 GDN。对照读 <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第4章_推理的核心数据结构入门.html">zero-to-sglang 第 4 章</a>，分清缓存的是 K、V。</p></article>
+        <article class="card"><h3>周 2 · 前向与显存</h3><p>可选用同代 4B 跑 5 步前向观测，比较有无 cache 的输入长度。用第 7 节写出 Prefill 结束、Decode 每步、再生成 l 个之后，容量基准改成 nvidia-smi 的读数。记录可见容量、权重、普通 KV 与 GDN 状态，区分模型加载 OOM 和运行 OOM。</p></article>
         <article class="card"><h3>周 3 · 流式与调度</h3><p>同一 9B checkpoint，客户端并发 1/2/4；同步记录引擎 max-num-seqs。先排除编译与冷启动，保存 TTFT、首答案时间、E2E、输出 token/s、长度和失败数。</p></article>
         <article class="card"><h3>周 4 · 前缀开关对照</h3><p>同一长 system 前缀，改变 user 后缀；顺序预热后对比 PREFIX_CACHE=0/1。确认混合状态缓存真实启用，结合缓存命中指标解释变化。</p></article>
         <article class="card"><h3>周 5 · 每次只调一项</h3><p>先比较上下文 4096/8192，再比较 CUDA Graph 开关、token 预算。条件允许再做 SGLang 同模型对照；无法兼容就记录限制，不用不同模型制造引擎胜负。</p></article>
@@ -992,6 +1048,8 @@ python3 examples/stream-bench.py \
         <p class="explain">长度分布、前缀重叠、是否流式、精度、是否默认配置都不同。无共享前缀的榜会低估 radix/prefix。</p></div>
       <div class="q"><strong>Q. OpenAI SDK 能直接打两家吗？</strong>
         <p class="explain">可以。改 base_url 与 model 名即可。注意 chat template / tool call 细节仍可能有差异，以各引擎文档为准。</p></div>
+      <div class="q"><strong>Q. 这一页把推理讲浅了吗？</strong>
+        <p class="explain">第 7 节对齐的是 zero-to-sglang 第 4 章：缓存的是每层 K 和 V、一次请求的生命周期、三笔显存账、连续分配在多请求下的四个问题。矩阵手算和章末题在原文链接里。想把同一条链路写成代码，接着读该仓库 Part II 的前向、KV 实现和 RadixAttention。</p></div>
       <div class="q"><strong>Q. Qwen3.5 支持 262144，T4 为什么先用 4096？</strong>
         <p class="explain">模型能力上限不等于本机可承载容量。4096 是保守实验值，不是模型原生上限；输入与输出合计不能超过它。9B BF16 仅按 9B×2 字节估算就约 18GB，超过 T4 标称容量，尚未计算视觉部分与运行开销。因此主线选 W4A16；更长窗口要实测预算后再增加。</p></div>
       <div class="q"><strong>Q. 关掉思考会改变模型吗？</strong>
@@ -1020,6 +1078,7 @@ python3 examples/stream-bench.py \
         </div>
       </header>
       <ul>
+        <li>KV 生命周期与显存账：Datawhale × RadixArk <a href="https://github.com/datawhalechina/zero-to-sglang">zero-to-sglang</a>（CC BY-NC-SA 4.0）。本手册引用并自行复述问题，不转载章节正文。<a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第4章_推理的核心数据结构入门.html">第 4 章 推理的核心数据结构入门</a> · <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第2章_推理入门.html">第 2 章</a> · <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第5章_Benchmark入门.html">第 5 章</a> · <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part2/第4章_KVCache优化.html">Part II KV Cache</a></li>
         <li>Transformer 论文：<a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a></li>
         <li>HF Transformers：<a href="https://huggingface.co/docs/transformers">文档</a> · <a href="https://github.com/huggingface/transformers">GitHub</a></li>
         <li>vLLM：<a href="https://docs.vllm.ai/">docs.vllm.ai</a> · <a href="https://blog.vllm.ai/2023/06/20/vllm.html">PagedAttention 博客</a> · <a href="https://vllm.ai/blog/2025-09-05-anatomy-of-vllm">Anatomy</a> · <a href="https://github.com/vllm-project/vllm">GitHub</a></li>
@@ -1034,7 +1093,7 @@ python3 examples/stream-bench.py \
     </section>
 
     <footer>
-      <p>图解与实验版：整模型前向、注意力、生成与缓存时序、Qwen3.5-9B 混合层都可以拖动。日期 2026-10-17。</p>
+      <p>图解与实验版：整模型前向、注意力、生成与缓存时序、KV 生命周期和 Qwen3.5-9B 混合层都可以拖动。KV 一节按 zero-to-sglang 第 4 章加深。日期 2026-10-17。</p>
       <p>在线阅读：<a href="https://evenchen6.github.io/vllm-sglang-handbook/">GitHub Pages</a> · 仓库 <a href="https://github.com/evenchen6/vllm-sglang-handbook">evenchen6/vllm-sglang-handbook</a></p>
     </footer>
   </main>
@@ -1354,6 +1413,72 @@ python3 examples/stream-bench.py \
   }
   renderKv();
 
+  /* ---------- KV lifecycle ---------- */
+  const lifeRange = $('#life-range');
+  const lifeNow = $('#life-now');
+  const lifeCache = $('#life-cache');
+  const lifeTok = ['推', '理', '中'];
+  const lifeNowState = [
+    ['wait', 'wait', 'wait'],
+    ['pool', 'wait', 'wait'],
+    ['calc', 'wait', 'wait'],
+    ['keep', 'calc', 'wait'],
+    ['keep', 'keep', 'wait'],
+    ['keep', 'keep', 'calc'],
+    ['wait', 'wait', 'wait']
+  ];
+  const lifeNowText = [
+    ['·', '·', '·'],
+    ['占位', '·', '·'],
+    ['Q,K,V', '·', '·'],
+    ['读 KV', 'Q,K,V', '·'],
+    ['读 KV', '读 KV', '·'],
+    ['读 KV', '读 KV', 'Q,K,V'],
+    ['·', '·', '·']
+  ];
+  const lifeCacheText = [
+    ['空', '空', '空'],
+    ['占', '空', '空'],
+    ['K,V', '空', '空'],
+    ['K,V', 'K,V', '空'],
+    ['K,V', 'K,V', '空'],
+    ['K,V', 'K,V', 'K,V'],
+    ['留/还', '留/还', '留/还']
+  ];
+  const lifeNotes = [
+    '请求还没来。KV 池里的页不属于任何一条序列。',
+    '请求到达，先占一个可写的位置。按页领取，不为还没生成的 token 预留整段。',
+    'Prefill 第一个 token：算出 q、k、v。k 和 v 写下。q 只参加这一步，不进缓存。',
+    'Prefill 第二个 token：再写一格 K、V。新的 q 可以读到两格历史。',
+    '采样只用最后一个位置的隐藏状态，得到 token id「中」。这一步没有新的 K、V。',
+    'Decode：把 token id 重新 embedding，再投影出本步的 q、k、v。只追加新的 k、v。上一步的隐藏状态不会被原样送回来。',
+    '生成结束。引用降到 0 的页归还空闲池。还能被后续请求命中的前缀继续被引用，直到淘汰。'
+  ];
+  function renderLife() {
+    const step = +lifeRange.value;
+    lifeNow.innerHTML = '';
+    lifeCache.innerHTML = '';
+    lifeTok.forEach((tok, i) => {
+      const now = document.createElement('div');
+      now.className = 'cell ' + lifeNowState[step][i];
+      now.innerHTML = `${lifeNowText[step][i]}<small>${tok} · 本步</small>`;
+      lifeNow.appendChild(now);
+      const cache = document.createElement('div');
+      const kind = lifeCacheText[step][i];
+      const cls = kind === 'K,V' ? 'keep' : (kind === '留/还' || kind === '占') ? 'pool' : 'wait';
+      const cap = kind === 'K,V' ? '缓存' : kind === '留/还' ? '结束' : kind === '占' ? '已领' : '未写';
+      cache.className = 'cell ' + cls;
+      cache.innerHTML = `${kind}<small>${cap}</small>`;
+      lifeCache.appendChild(cache);
+    });
+    $('#life-label').textContent = `${step + 1} / 7`;
+    $('#life-note').textContent = lifeNotes[step];
+    lifeRange.setAttribute('aria-valuetext', lifeNotes[step]);
+  }
+  lifeRange.addEventListener('input', renderLife);
+  bindScrub(lifeNow, lifeRange, 1);
+  renderLife();
+
   /* ---------- KV estimator ---------- */
   function fmtBytes(n) {
     if (n < 1024) return n.toFixed(0) + ' B';
@@ -1363,16 +1488,22 @@ python3 examples/stream-bench.py \
   }
   function updateKvEst() {
     const L = +$('#kv-L').value, H = +$('#kv-H').value, D = +$('#kv-D').value;
-    const S = +$('#kv-S').value, B = +$('#kv-B').value, by = +$('#kv-bytes').value;
-    const total = 2 * L * H * D * S * B * by;
+    const T = +$('#kv-S').value, G = +$('#kv-G').value, B = +$('#kv-B').value, by = +$('#kv-bytes').value;
+    const perTok = 2 * L * H * D * by;
+    const prefill = perTok * T * B;
+    const step = perTok * B;
+    const total = perTok * (T + G) * B;
     const capacity = Math.max(0.1, +$('#kv-cap').value || 15);
     const cap = capacity * 1024 ** 3;
     const fixed = Math.max(0, +$('#kv-fixed').value || 0) * 1024 ** 3;
-    const pct = total / cap * 100;
     const combined = total + fixed;
-    $('#kv-meter').style.width = Math.min(100, Math.max(0, combined / cap * 100)) + '%';
-    $('#kv-est').textContent = `全注意力 KV ${fmtBytes(total)}，占 ${capacity} GiB 基准的 ${pct.toFixed(1)}%；单请求 ${fmtBytes(total / Math.max(B, 1))}。` +
-      (fixed > 0 ? ` 加上所填固定开销，理论合计 ${fmtBytes(combined)}。` : ' 当前只算 KV；固定开销尚未填写。') +
+    const pct = combined / cap * 100;
+    $('#kv-prefill').textContent = fmtBytes(prefill);
+    $('#kv-step').textContent = fmtBytes(step) + ' / 批';
+    $('#kv-total').textContent = fmtBytes(total);
+    $('#kv-meter').style.width = Math.min(100, Math.max(0, pct)) + '%';
+    $('#kv-est').textContent = `单请求每 token ${fmtBytes(perTok)}（K 与 V）。生成 l 之后全注意力 KV ${fmtBytes(total)}，占 ${capacity} GiB 基准的 ${(total / cap * 100).toFixed(1)}%。` +
+      (fixed > 0 ? ` 加上所填固定开销，理论合计 ${fmtBytes(combined)}（${pct.toFixed(1)}%）。` : ' 当前只算 KV；固定开销尚未填写。条显示的是生成之后的 KV。') +
       (combined > cap ? ' 超出所填容量基准。' : '');
   }
   $('#kv-range').addEventListener('input', () => {
@@ -1383,7 +1514,7 @@ python3 examples/stream-bench.py \
     const s = Math.max(256, Math.min(262144, +$('#kv-S').value || 256));
     $('#kv-range').value = String(Math.round(s / 256) * 256);
   });
-  ['kv-L','kv-H','kv-D','kv-S','kv-B','kv-bytes','kv-cap','kv-fixed'].forEach(id => $( '#'+id ).addEventListener('input', updateKvEst));
+  ['kv-L','kv-H','kv-D','kv-S','kv-G','kv-B','kv-bytes','kv-cap','kv-fixed'].forEach(id => $( '#'+id ).addEventListener('input', updateKvEst));
   updateKvEst();
 
   /* ---------- PagedAttention mem lab ---------- */
@@ -1527,6 +1658,8 @@ python3 examples/stream-bench.py \
   /* ---------- quiz ---------- */
   const questions = [
     { q: '小 batch Decode 阶段更常被描述为？', opts: ['Compute-bound，决定 TTFT', 'Memory-bound，强依赖 KV 带宽', '与 prefill 完全相同', '不需要注意力'], a: 1, why: '小 batch 的 decode 反复读取模型权重和历史 KV，常受显存带宽限制；瓶颈随 batch、长度和架构改变。' },
+    { q: 'KV Cache 里按层留下的是？', opts: ['Q、K、V 三份', 'K 和 V，Q 用完即弃', '只有最后一层的隐藏状态', 'LM Head 的 logits'], a: 1, why: 'Q 只参加当前这一步的注意力。K、V 要留给后面的 token 读取。' },
+    { q: 'Decode 新的一步，送进模型的是？', opts: ['上一步的隐藏状态', '新 token id 再做一次 embedding', '整段 prompt 重算', '只把 V 送进去'], a: 1, why: '采样得到 token id。下一步从 embedding 投影出 q、k、v，再把 k、v 追加到缓存。' },
     { q: 'PagedAttention 主要解决什么？', opts: ['提高词表大小', 'KV 连续预留导致的碎片与浪费', '替代 softmax', '自动写训练代码'], a: 1, why: '把 KV 切成页按需映射，类比 OS 分页。' },
     { q: 'RadixAttention 的独特重心是？', opts: ['只做量化', '跨请求自动前缀匹配复用 KV', '只支持 encoder-only', '取消 continuous batching'], a: 1, why: 'radix 树索引前缀，适合多轮/agent 共享 prompt。' },
     { q: 'TTFT 对应推荐侧更像？', opts: ['特征维度', '首包 / 首屏延迟', '离线小时级批任务', '词表大小'], a: 1, why: '用户感知「多久开始吐字」。' },
@@ -1587,7 +1720,8 @@ python3 examples/stream-bench.py \
     ['SGLang', 'Structured Generation Language，高性能 serving；口语 slang 通常指它。'],
     ['Prefill', '处理完整输入并构建 KV 的阶段，影响 TTFT。'],
     ['Decode', '自回归生成后续 token 的阶段，影响 TPOT/ITL。'],
-    ['KV Cache', '缓存的 attention Key/Value，用显存换重复计算。'],
+    ['KV Cache', '每层留下的 Key 和 Value。Q 不进入缓存。用显存换掉对历史 token 的重复投影。'],
+    ['KV block / page', '引擎分配 KV 的固定大小页。请求结束时按引用计数归还；前缀缓存会继续引用还能命中的页。'],
     ['PagedAttention', '页式 KV 管理（vLLM 代表作）。'],
     ['RadixAttention', 'radix 树前缀索引的跨请求 KV 复用（SGLang）。'],
     ['Continuous Batching', '请求动态组成 batch 的持续调度。'],
