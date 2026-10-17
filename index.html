@@ -713,8 +713,8 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         </div>
         <div class="controls">
           <label class="field">GDN 层数 <input type="number" id="kv-gdn" value="24" min="0" max="256"></label>
-          <label class="field">GDN 状态字节/元素
-            <select id="kv-gdn-bytes"><option value="2">FP16 (2)</option><option value="4">FP32 (4)</option></select>
+          <label class="field">GDN 递推状态字节/元素
+            <select id="kv-gdn-bytes"><option value="4">FP32 (4)，config 默认</option><option value="2">FP16 (2)</option></select>
           </label>
           <label class="field">容量基准 GiB（按 nvidia-smi 修改）<input type="number" id="kv-cap" value="15" min="1" max="256" step="0.1"></label>
           <label class="field">权重 + 其他开销 GiB<input type="number" id="kv-fixed" value="0" min="0" max="256" step="0.01"></label>
@@ -732,7 +732,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <div class="meter" aria-hidden="true"><i id="kv-meter"></i></div>
         <div class="result scoreline" id="kv-est">—</div>
         <p class="explain">默认是 <a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5-9B</a> 模型卡上的全注意力：8 层、4 个 KV 头、头维 256。公式 <code>2 × L × n<sub>kv</sub> × d × tokens × B × bytes</code> 只算这些层的 K 和 V。容量基准默认 15 GiB，贴近 T4 上 nvidia-smi 常见的可见容量，请改成自己的读数。临时工作区、缓存池对齐和 CUDA Graph 都不在公式内，理论合计也不等于实测峰值。长度默认相同；真实请求要用各请求长度之和。</p>
-        <p class="explain"><strong>另外 24 层 GDN 每条序列各有一份固定大小的状态。</strong>按 <a href="https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json">config.json</a>，每层递推状态是 32 个 V 头 × 128 × 128，卷积状态是 (16×128×2 + 32×128) × 3；vLLM v0.18.1 默认跟随模型 dtype，这里 FP16 时每层约 1.05 MiB，24 层约 25.1 MiB。它不随上下文变长，但每多一条并发序列就多一份。所以短对话时，GDN 状态可能比那 8 层 KV 还大。</p>
+        <p class="explain"><strong>另外 24 层 GDN 每条序列各有一份固定大小的状态。</strong>按 <a href="https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json">config.json</a>，每层递推状态是 32 个 V 头 × 128 × 128，卷积状态是 (16×128×2 + 32×128) × 3。config 里写了 <code>mamba_ssm_dtype: float32</code>，vLLM v0.18.1 会照此把递推状态存成 FP32，卷积状态跟随模型 dtype（这里 FP16）。合起来每层约 2.05 MiB，24 层约 49.1 MiB。它不随上下文变长，但每多一条并发序列就多一份。所以短对话时，GDN 状态比那 8 层 KV 还大。<code>--mamba-ssm-cache-dtype float16</code> 可以减半，vLLM 会打印警告，对输出质量的影响要自己验收。</p>
         <p class="explain">权重 9.35 GiB 是把<a href="https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/model.safetensors.index.json">固定 revision 的 W4A16 checkpoint</a> 里语言模型部分的张量逐个加起来得到的（不含视觉塔与 MTP）：FFN 与全注意力是 4bit，24 层 GDN 的线性层、Embedding、LM Head 仍是 16 位。T4 上 15 GiB × 0.85 的预算里，留给 KV、GDN 状态与激活的大约只有 3.4 GiB。</p>
         <p class="explain">对一下原文例题：把 L、KV 头、头维、T、l、B 改成 36、8、128、100、0、1，字节选 BF16，GDN 层数改成 0（那是纯全注意力模型）。Prefill 与「再生成 l 个之后」都应约为 14.06 MiB，每步新增显示 144.0 KiB（约 0.14 MiB）。滑条从 256 起步，这一题改数字框；再拖滑条会把 T 吸到 256 的倍数。那一章用的是 Qwen3-4B-Thinking-2507，不是本页默认的 9B。</p>
       </div>
@@ -820,7 +820,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <div class="scroll-x"><svg class="roof" id="roof-svg" viewBox="0 0 560 230" role="img" aria-label="T4 屋顶线"></svg></div>
         <div class="result scoreline" id="roof-est">—</div>
         <p class="explain">两根条里长的那根决定这一步至少要多久。图上横轴是算术强度，纵轴是能达到的算力；斜线是带宽屋顶，平线是算力屋顶，圆点是当前设置。</p>
-        <p class="explain">口径：每步读权重 8.00 GB，是语言模型 10.04 GB 减去 Embedding 表 2.03 GB（查表只读几行）。每个 token 的线性层参数 7.94 B，其中 LM Head 1.02 B；Prefill 只为最后一个位置算 LM Head。每条序列每步还要读全注意力 KV（上下文 × 32 KiB），并读、写各一次 GDN 状态（25.1 MiB）。Prefill 按 chunk 切开时，每个 chunk 都要再读一遍权重。注意力的 q·K、a·V 计入 FLOPs；GDN 递推的运算、反量化开销和 kernel 实际效率都没算，真实速度会低于这里的上界。</p>
+        <p class="explain">口径：每步读权重 8.00 GB，是语言模型 10.04 GB 减去 Embedding 表 2.03 GB（查表只读几行）。每个 token 的线性层参数 7.94 B，其中 LM Head 1.02 B；Prefill 只为最后一个位置算 LM Head。每条序列每步还要读全注意力 KV（上下文 × 32 KiB），并读、写各一次 GDN 状态（49.1 MiB，递推部分按 config 存 FP32）。Prefill 按 chunk 切开时，每个 chunk 都要再读一遍权重。注意力的 q·K、a·V 计入 FLOPs；GDN 递推的运算、反量化开销和 kernel 实际效率都没算，真实速度会低于这里的上界。</p>
       </div>
       <table>
         <thead><tr><th>指标</th><th>含义</th><th>推荐类比</th></tr></thead>
@@ -935,7 +935,7 @@ docker run --rm --gpus device=0 --ipc=host \
         <p class="explain" id="mem-note">连续模式下，未用满的预留也会占格；分页模式只标记真正写入的块。颜色 A/B/C 表示不同请求。</p>
       </div>
       <p>分页之后仍有两类浪费：每条请求最后一页没写满（内部碎片，平均约半页）；以及被前缀缓存留着、暂时没人用的页（可被淘汰）。多条请求共享同一段前缀时，可以让各自的块表指向同一批物理页，用引用计数管理；有人要在共享页上继续写时，再复制一份（copy-on-write）。</p>
-      <div class="callout warn"><strong>在你的 9B 上，一页不是 16 个 token。</strong>vLLM 默认块大小是 16，但 Qwen3.5 是混合模型：KV 池里的一页还要能装下一层 GDN 状态（约 1.05 MiB）。按 <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py">v0.18.1 源码</a>的规则，不开前缀缓存时块大小 = 16 × ⌈1.05 MiB ÷ (16 × 4 KiB)⌉ = <strong>272 个 token</strong>；开了前缀缓存还可能按内核要求再调。启动日志里会打印「Setting attention block size to N tokens」，以那一行为准。块越大，尾页碎片越大，前缀缓存的命中粒度也越粗（第 18 节）。</div>
+      <div class="callout warn"><strong>在你的 9B 上，一页不是 16 个 token。</strong>vLLM 默认块大小是 16，但 Qwen3.5 是混合模型：KV 池里的一页还要能装下一层 GDN 状态（递推部分按 config 存 FP32，约 2.05 MiB）。按 <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py">v0.18.1 源码</a>的规则，不开前缀缓存时块大小 = 16 × ⌈2.05 MiB ÷ (16 × 4 KiB)⌉ = <strong>528 个 token</strong>；开了前缀缓存还可能按内核要求再调，改用 FP16 状态则约 272。启动日志里会打印「Setting attention block size to N tokens」，以那一行为准。块越大，尾页碎片越大，前缀缓存的命中粒度也越粗（第 18 节）。</div>
       <p>分页式 KV 如今已成为现代引擎标配（SGLang 也采用同类思路）。vLLM 的差异化更多转向广模型 / 广硬件生态与工程完备度（见 Red Hat 2026-10-14 文）。<a class="cite" href="https://docs.vllm.ai/en/stable/design/hybrid_kv_cache_manager/">vLLM 混合 KV 缓存设计</a></p>
     </section>
 
@@ -1657,7 +1657,7 @@ python3 examples/stream-bench.py \
   const T4 = { flops: 65e12, bw: 320e9 };
   const Q9 = {
     weightRead: 8.004e9, body: 6.9185e9, head: 1.0171e9,
-    kvPerTok: 2 * 8 * 4 * 256 * 2, gdnState: 24 * (32 * 128 * 128 + 8192 * 3) * 2,
+    kvPerTok: 2 * 8 * 4 * 256 * 2, gdnState: 24 * (32 * 128 * 128 * 4 + 8192 * 3 * 2),
     attn: { layers: 8, heads: 16, dim: 256 }
   };
   let roofMode = 'decode';
@@ -1920,7 +1920,7 @@ python3 examples/stream-bench.py \
     const step = perTok * B;
     const total = perTok * (T + G) * B;
     const gdnLayers = Math.max(0, +$('#kv-gdn').value || 0);
-    const gdnPerSeq = gdnLayers * (32 * 128 * 128 + (16 * 128 * 2 + 32 * 128) * 3) * +$('#kv-gdn-bytes').value;
+    const gdnPerSeq = gdnLayers * (32 * 128 * 128 * +$('#kv-gdn-bytes').value + (16 * 128 * 2 + 32 * 128) * 3 * 2);
     const gdn = gdnPerSeq * B;
     const capacity = Math.max(0.1, +$('#kv-cap').value || 15);
     const cap = capacity * 1024 ** 3;
@@ -2351,7 +2351,7 @@ python3 examples/stream-bench.py \
     { q: '仍处在带宽受限区时，并发从 1 提到 8，理论上？', opts: ['单条请求快 8 倍', '每步时间几乎不变，总吞吐接近 8 倍', '总吞吐不变', '每步时间变成 8 倍'], a: 1, why: '权重每步只读一遍，被这一步的所有序列共用。在 KV 读取或算力追上来之前，加并发主要抬总吞吐，单条请求速度基本不变。' },
     { q: 'vLLM APC 块大小 4，两个请求前 10 个 token 相同，新请求最多复用？', opts: ['10 个', '8 个', '4 个', '0 个'], a: 1, why: 'APC 只缓存写满的块，命中按整块计：前两块 8 个 token 命中，第三块只有 2 个相同，整块不算。' },
     { q: 'Qwen3.5-9B 一层全注意力有 16 个 Q 头、4 个 KV 头。KV cache 和每头各存一份相比？', opts: ['一样大', '1/4', '4 倍', '1/16'], a: 1, why: 'GQA 让每 4 个 Q 头共用一组 K、V，缓存只存 4 组：每层每 token 4 KiB，而不是 16 KiB。' },
-    { q: 'GDN 层每条序列的状态随上下文长度？', opts: ['线性增长', '不变，24 层合计约 25 MiB（FP16）', '平方增长', '为 0'], a: 1, why: '递推状态是固定的 32 × 128 × 128，加上很小的卷积状态；不随长度涨，但每多一条并发序列就多一份。' },
+    { q: 'GDN 层每条序列的状态随上下文长度？', opts: ['线性增长', '不变，24 层合计约 49 MiB', '平方增长', '为 0'], a: 1, why: '递推状态是固定的 32 × 128 × 128（config 指定 FP32），加上很小的卷积状态；不随长度涨，但每多一条并发序列就多一份。' },
     { q: '单张 16GB T4 上跑 Qwen3.5-9B，起步用？', opts: ['照抄官方 BF16 与 262144 上下文', 'W4A16 文本权重，上下文从短窗口试', '打开 FP8 W8A8，因为 T4 支持', '两张卡做张量并行'], a: 1, why: 'T4 上主线尝试 W4A16 权重、FP16 激活与短上下文；权重容量、量化内核和 GDN 兼容性需分别验证。配置未实测，不保证启动成功。' }
   ];
   const quizBox = $('#quiz-box');
