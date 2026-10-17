@@ -626,9 +626,10 @@
 import torch
 
 # 接口示意。16GB T4 上请不要 from_pretrained 这份全精度权重。
+# Ampere+ 常用 BF16；较新 Transformers 用 dtype=（torch_dtype 逐步弃用）
 name = "Qwen/Qwen3.5-9B"
 tok = AutoTokenizer.from_pretrained(name)
-model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16, device_map="auto")
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16, device_map="auto")
 
 messages = [{"role": "user", "content": "用一句话解释 KV cache"}]
 text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -744,8 +745,8 @@ print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
         <label class="got"><input type="checkbox" data-got="more"> 这节能复述</label>
       </header>
       <div class="grid-3">
-        <article class="card"><h3>Prefix caching</h3><p>跨请求复用相同 prompt 前缀的 KV。vLLM 可配置开关；与 SGLang 的 Radix 是同一问题的不同实现重心。</p></article>
-        <article class="card"><h3>量化</h3><p>更低位宽存权重或 KV（FP8、W4A16 / AWQ / GPTQ 等），换显存与带宽，需业务验收质量。T4 不支持 FP8；这张卡的 9B 演示用 W4A16。</p></article>
+        <article class="card"><h3>Prefix caching</h3><p>跨请求复用相同 prompt 前缀的 KV。<strong>vLLM V1 默认开启</strong> Automatic Prefix Caching（关闭：<code>--no-enable-prefix-caching</code>）；SGLang <strong>默认开启</strong> RadixAttention（关闭：<code>--disable-radix-cache</code>）。两边都是默认复用，差在索引结构与调度重心，不是「手开 vs 自动」。</p></article>
+        <article class="card"><h3>量化</h3><p>分清三口径，别混为一谈：<strong>Weight-only</strong>（如 W4A16 / AWQ / GPTQ：权重低压，激活多为 16bit）；<strong>W8A8 / FP8</strong>（权重与激活一并低压）；<strong>KV quant</strong>（压 KV cache）。都换显存与带宽，需业务验收质量。T4 不支持 FP8；这张卡的 9B 演示用 W4A16。</p></article>
         <article class="card"><h3>Speculative decoding</h3><p>草稿模型提议、目标模型验证，加速 decode。以当前版本文档为准。</p></article>
       </div>
       <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制模型抬吞吐；<strong>EP</strong> 切 MoE expert。</p>
@@ -760,7 +761,7 @@ print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
         </div>
         <label class="got"><input type="checkbox" data-got="proc"> 这节能复述</label>
       </header>
-      <p>在线服务常见：API 进程收 HTTP，引擎进程（或同进程模块）做调度与 GPU 执行。多卡 TP 时还会按并行度拉起 worker。精确进程模型随 vLLM V1 等架构演进，以 <a href="https://vllm.ai/blog/2025-09-05-anatomy-of-vllm">Anatomy of vLLM</a> 与当前文档为准。</p>
+      <p>在线服务常见：API 收 HTTP，引擎做调度与 GPU 执行；多卡 TP 再拉起 worker。现行默认引擎是 <strong>vLLM V1</strong>，进程模型以 <a href="https://vllm.ai/blog/2025-09-05-anatomy-of-vllm">Anatomy of vLLM</a> 与当前文档为准，勿沿用早期「单引擎进程」心智。</p>
       <div class="lab">
         <div class="lab-h"><strong>进程数计算器（示意）</strong></div>
         <div class="controls">
@@ -769,7 +770,7 @@ print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
           <label class="field">DP 副本 <input type="number" id="proc-dp" value="1" min="1" max="64"></label>
         </div>
         <div class="result scoreline" id="proc-est">—</div>
-        <p class="explain">示意：GPU worker ≈ TP × DP；外加 API 进程。真实部署还有 tokenizer、metrics、路由等，不要当成官方公式。</p>
+        <p class="explain">示意：GPU worker ≈ TP × DP；外加 API。V1 还有 EngineCore / tokenizer 等进程拆分——<strong>勿按此公式估生产进程表</strong>，以 Anatomy of vLLM 为准。</p>
       </div>
       <div class="grid-2">
         <article class="card"><h3>在线：<code>vllm serve</code></h3><p>OpenAI 兼容 HTTP，默认端口常见 8000。适合接推荐网关。</p></article>
@@ -786,7 +787,7 @@ print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
         </div>
         <label class="got"><input type="checkbox" data-got="vllm-run"> 这节能复述</label>
       </header>
-      <p>安装行来自 <a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5-9B 模型卡</a>（Qwen3.5 需要较新的 vLLM）。环境要求随版本变，落地前再看一次卡片。</p>
+      <p>官方 <a href="https://docs.vllm.ai/en/latest/getting_started/quickstart.html">Quickstart</a> 的示例模型以页面当前为准（常见的 Qwen2.5 可能被替换）。下面的安装与启动来自 <a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5-9B 模型卡</a>（Qwen3.5 需要较新的 vLLM），面向单张 T4 的 W4A16 文本演示。环境要求随版本变，落地前再看一次卡片与 Quickstart。</p>
       <pre><code>uv venv --python 3.12 --seed
 source .venv/bin/activate
 uv pip install vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly</code></pre>
@@ -809,7 +810,7 @@ curl http://localhost:8000/v1/models</code></pre>
           <tr><td><code>-tp</code></td><td>张量并行卡数</td><td>模型分片宽度</td></tr>
           <tr><td><code>--max-num-seqs</code></td><td>单步最多序列数</td><td>最大并发</td></tr>
           <tr><td><code>--max-num-batched-tokens</code></td><td>单步 token 预算</td><td>批配额；影响 TTFT↔ITL</td></tr>
-          <tr><td>prefix caching 开关</td><td>前缀缓存</td><td>公共特征缓存</td></tr>
+          <tr><td>APC（V1 默认开）</td><td>Automatic Prefix Caching；关：<code>--no-enable-prefix-caching</code></td><td>公共特征缓存</td></tr>
         </tbody>
       </table>
       <p>对照：模型卡上的全精度文本命令，面向能放下 BF16（recipe 约 22GB）和 262144 上下文的机器。</p>
@@ -863,7 +864,7 @@ print(resp.choices[0].message.content)</code></pre>
         <thead><tr><th>维度</th><th>vLLM（起源重心）</th><th>SGLang（起源重心）</th></tr></thead>
         <tbody>
           <tr><td>KV 分配</td><td>PagedAttention 降碎片</td><td>高效分页 + radix 索引</td></tr>
-          <tr><td>跨请求复用</td><td>Prefix caching（可配置）</td><td>RadixAttention 自动前缀复用</td></tr>
+          <tr><td>跨请求复用</td><td>APC 默认开启（block hash）；可 <code>--no-enable-prefix-caching</code> 关</td><td>RadixAttention 默认开启；可 <code>--disable-radix-cache</code> 关</td></tr>
           <tr><td>前端</td><td>OpenAI API / 引擎参数</td><td>OpenAI API + 结构化生成 / DSL 传统</td></tr>
           <tr><td>今日</td><td colspan="2">两边都在吸收对方能力；选型看负载与生态，而非 2023 标签</td></tr>
         </tbody>
@@ -934,8 +935,8 @@ print(resp.choices[0].message.content)</code></pre>
         <tbody>
           <tr><td>生态体量</td><td>通常更大、recipes 多</td><td>增长快；与部分开源前沿模型协作深</td></tr>
           <tr><td>易用性</td><td><code>vllm serve</code> + OpenAI API</td><td><code>sglang serve</code> + OpenAI API；另有可编程前端</td></tr>
-          <tr><td>前缀复用</td><td>Prefix caching</td><td>RadixAttention 为设计原点</td></tr>
-          <tr><td>优先考虑</td><td>通用模型快速上线、广兼容</td><td>多轮 / agent / 共享前缀明显、大 MoE</td></tr>
+          <tr><td>前缀复用</td><td>V1 默认 APC（block hash + LRU）</td><td>RadixAttention 为设计原点（默认开）</td></tr>
+          <tr><td>优先考虑</td><td>通用模型快速上线、广兼容</td><td>多轮 / agent / 共享前缀明显；部分前沿 MoE 常有强 Day-0（非独占，两边都查再实测）</td></tr>
         </tbody>
       </table>
       <p><strong>Red Hat（2026-10-14）</strong>：多模型默认配置下两者表现常接近，选择更多看功能交付；其样例表 prompt 几乎无共享前缀，不能代表 chat/agent 收益。原文：
@@ -999,7 +1000,7 @@ print(resp.choices[0].message.content)</code></pre>
         </article>
         <article class="card">
           <h3>周 4 · 前缀复用</h3>
-          <p>共享一条长 system prompt，只改 user。vLLM 看 prefix caching；SGLang 能启动再看 radix。加载的若是 Qwen3.5-4B 或其他权重，单独画图，不和 9B 的延迟比。</p>
+          <p>共享一条长 system prompt，只改 user。vLLM 看默认开启的 APC（<code>--no-enable-prefix-caching</code> 可关）；SGLang 能启动再看默认开启的 RadixAttention（<code>--disable-radix-cache</code> 可关）。加载的若是 Qwen3.5-4B 或其他权重，单独画图，不和 9B 的延迟比。</p>
         </article>
         <article class="card">
           <h3>周 5 · 同一张 T4 上选型</h3>
@@ -1643,15 +1644,17 @@ print(resp.choices[0].message.content)</code></pre>
     ['TPOT', 'Time Per Output Token，每输出 token 平均间隔。'],
     ['ITL', 'Inter-Token Latency，词间间隔。'],
     ['TP / PP / DP / EP', '张量 / 流水 / 数据 / 专家 并行。'],
-    ['Prefix Caching', '跨请求复用相同 prompt 前缀的 KV。'],
+    ['Prefix Caching / APC', '跨请求复用相同 prompt 前缀的 KV。vLLM V1 默认开启 Automatic Prefix Caching。'],
+    ['W4A16', '权重量化到约 4bit、激活用 16bit（weight-only，如 AWQ/GPTQ 常见形态）。T4 上用来放下 Qwen3.5-9B。'],
+    ['FP8 / W8A8', '权重与激活（或 KV）用更低位宽；与 weight-only 不是同一口径。'],
+    ['KV Quant', '量化 KV cache，主要省显存与带宽，不替代权重量化。'],
     ['Speculative Decoding', '草稿模型提议、目标模型验证以加速。'],
     ['Chunked Prefill', '把长 prefill 切块与 decode 交错调度。'],
-    ['Preemption', 'KV 不够时抢占请求释放显存，之后可能重算。'],
+    ['Preemption', 'KV 不够时抢占请求释放显存；常见路径是之后重算（历史上还有 swap 等模式）。'],
     ['GQA / MQA', '分组/多查询注意力，减少 KV 头数以省显存。'],
     ['OpenAI Compatible', '提供 /v1/chat/completions 一类 HTTP 接口。'],
     ['Qwen3.5-9B', '本手册的演示模型。32 层混合结构：每 4 层中 3 层 Gated DeltaNet、1 层全注意力。'],
     ['Gated DeltaNet', 'Qwen3.5 里的线性递推层，不按 token 增长 KV。'],
-    ['W4A16', '权重 4 bit、激活 16 bit。T4 上用来放下 Qwen3.5-9B。'],
     ['Thinking mode', 'Qwen3.5 默认先生成思考再回答。关掉用 chat_template_kwargs.enable_thinking = false。']
   ];
   const gloss = $('#gloss-list');
