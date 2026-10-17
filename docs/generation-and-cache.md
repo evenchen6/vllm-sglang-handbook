@@ -56,6 +56,8 @@ Prefill 可以并行处理多个输入位置；因果 mask 只限制“看谁”
 
 另外 24 层 GDN 使用卷积与递推状态，并非每个 token 都保存完整 K/V 历史；**这不意味着它们没有缓存或不占显存**。单个活跃序列的滚动状态通常不随完整历史线性增长，但多序列、状态精度、引擎状态检查点与 prefix caching 会改变实际内存分配。
 
+按 config 与 vLLM v0.18.1 的状态形状：每层递推状态 `32 × 128 × 128`，卷积状态 `(16×128×2 + 32×128) × 3`。状态 dtype 默认跟随模型 dtype，FP16 时每层约 1.05 MiB，24 层约 25.1 MiB / 序列。全注意力每 token 32 KiB，所以单条序列在约 800 token 以内时，GDN 状态比 8 层 KV 还大。
+
 整卡预算至少包括：模型实际权重 + 全注意力 KV 池 + GDN 状态/检查点 + 临时激活/工作区 + CUDA Graph/框架等。nvidia-smi 占用、PyTorch allocated/reserved 与逻辑 KV 使用量是不同口径。
 
 ## PagedAttention、Radix 与 FlashAttention 各优化什么
@@ -66,11 +68,21 @@ Prefill 可以并行处理多个输入位置；因果 mask 只限制“看谁”
 | APC / Radix 前缀缓存 | 复用相同 token 前缀的既有计算 | 不是语义相似缓存；不能任意拼接相同中间句子 |
 | FlashAttention 类内核 | 减少注意力计算的中间矩阵物化与 HBM 读写 | 不等于分页，也不等于跨请求复用；硬件与版本要求独立 |
 
+vLLM 的 KV 池只有一种页大小，混合模型的一页要装得下一层 GDN 状态。按 v0.18.1 源码，不开前缀缓存时注意力块大小为 `16 × ⌈1.05 MiB ÷ (16 × 4 KiB)⌉ = 272` token，而不是默认的 16；APC 只缓存写满的块，命中粒度因此也是 272 的倍数。以启动日志为准。
+
 混合模型的前缀恢复必须同时正确恢复普通 KV 和递推状态。能缓存全注意力层，不自动意味着全部混合状态都可在任意 token 边界恢复。前缀缓存通常减少 prefill，不能直接消除 decode 读取历史的成本。
 
 ## 从后台服务经验理解性能
 
 Prefill 的多位置矩阵乘可复用权重，长 prompt 常偏计算受限；小 batch decode 每步的计算量少，但需反复读取权重和历史 KV，常偏带宽受限。实际瓶颈取决于 batch、序列长度、硬件、量化与架构；不能只记“decode 只读 KV”或“prefill 永远 compute-bound”。
+
+用 T4 规格（FP16 张量核 65 TFLOPS、带宽 320 GB/s，拐点约 203 FLOP/byte）可以算出理论界：
+
+- 每个 decode 步要读除 Embedding 表以外的全部权重，约 8.0 GB（W4A16 语言模型 10.04 GB 减 2.03 GB）；每个 token 的线性层约 2 × 7.94 B 次浮点运算。B 条序列的算术强度约 2B FLOP/byte，B = 1 时比拐点低两个数量级。
+- 单条请求每步至少 8.0 GB ÷ 320 GB/s ≈ 25 ms，即不超过约 40 tok/s。带宽受限时加并发，每步时间几乎不变，总吞吐近似按 B 增长；上下文和并发一大，KV 与 GDN 状态的读取会成为主要部分。
+- 1024 token 的 prefill 约 14 TFLOP，至少约 0.22 s，属于算力受限。按 chunk 切开时每个 chunk 都要再读一遍权重。
+
+这些都是上界/下界：没算反量化、kernel 效率与调度开销，也没在 T4 上实测。用它先做预测，再拿实测对比。
 
 连续批处理在调度步边界补入新请求，完成即离开，不是在某个运行中的 GPU kernel 中途插入请求。`max-num-seqs` 是调度容量上限，不是客户端连接/QPS 限流。
 
@@ -83,4 +95,6 @@ Prefill 的多位置矩阵乘可复用权重，长 prompt 常偏计算受限；�
 - [Qwen3.5-9B 模型卡](https://huggingface.co/Qwen/Qwen3.5-9B) 与 [Transformers 模型文档](https://huggingface.co/docs/transformers/model_doc/qwen3_5)。
 - [vLLM 执行流程](https://vllm.ai/blog/2025-09-05-anatomy-of-vllm) 与 [混合缓存管理](https://docs.vllm.ai/en/stable/design/hybrid_kv_cache_manager/)。
 - [LMSYS RadixAttention](https://lmsys.org/blog/2024-01-17-sglang/)。
+- [NVIDIA T4 规格](https://www.nvidia.com/en-us/data-center/tesla-t4/)、[Qwen3.5-9B config.json](https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json)、[W4A16 固定 revision 张量索引](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/model.safetensors.index.json)。
+- [vLLM APC 设计](https://docs.vllm.ai/en/stable/design/prefix_caching.html)、[v0.18.1 混合模型块大小](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py)、[v0.18.1 GDN 状态形状](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/layers/mamba/mamba_utils.py)。
 - [Transformers 连续批处理与服务能力](https://huggingface.co/docs/transformers/continuous_batching)：朴素 generate 封装不等于该库今天的全部能力。
