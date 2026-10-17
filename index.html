@@ -746,7 +746,7 @@ print(tok.decode(out[0], skip_special_tokens=True))</code></pre>
       </header>
       <div class="grid-3">
         <article class="card"><h3>Prefix caching</h3><p>跨请求复用相同 prompt 前缀的 KV。<strong>vLLM V1 默认开启</strong> Automatic Prefix Caching（关闭：<code>--no-enable-prefix-caching</code>）；SGLang <strong>默认开启</strong> RadixAttention（关闭：<code>--disable-radix-cache</code>）。两边都是默认复用，差在索引结构与调度重心，不是「手开 vs 自动」。</p></article>
-        <article class="card"><h3>量化</h3><p>分清三口径，别混为一谈：<strong>Weight-only</strong>（如 W4A16 / AWQ / GPTQ：权重低压，激活多为 16bit）；<strong>W8A8 / FP8</strong>（权重与激活一并低压）；<strong>KV quant</strong>（压 KV cache）。都换显存与带宽，需业务验收质量。T4 不支持 FP8；这张卡的 9B 演示用 W4A16。</p></article>
+        <article class="card"><h3>量化</h3><p>分清三口径，别混为一谈：<strong>Weight-only</strong>（如 W4A16 / AWQ / GPTQ：权重低压，激活多为 16bit）；<strong>W8A8 / FP8</strong>（权重与激活一并低压）；<strong>KV quant</strong>（压 KV cache）。都换显存与带宽，需业务验收质量。T4 不支持 FP8 W8A8 加速（见官方兼容表）；这张卡的 9B 演示用 W4A16。</p></article>
         <article class="card"><h3>Speculative decoding</h3><p>草稿模型提议、目标模型验证，加速 decode。以当前版本文档为准。</p></article>
       </div>
       <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制模型抬吞吐；<strong>EP</strong> 切 MoE expert。</p>
@@ -1058,7 +1058,7 @@ print(resp.choices[0].message.content)</code></pre>
       <div class="q"><strong>Q. OpenAI SDK 能直接打两家吗？</strong>
         <p class="explain">可以。改 base_url 与 model 名即可。注意 chat template / tool call 细节仍可能有差异，以各引擎文档为准。</p></div>
       <div class="q"><strong>Q. 模型卡写了 262144，这张 T4 为什么用 8192？</strong>
-        <p class="explain">262144 是 Qwen3.5-9B 的原生上下文，模型卡还建议思考任务尽量保持至少 128K。vLLM recipe 把 BF16 放在约 22GB、单张 24GB 卡上。T4 是 16GB，且不支持 FP8。全精度和长上下文会在加载权重或分配 KV 时失败。这张卡用 W4A16 文本权重，上下文从 8192 往上试。</p></div>
+        <p class="explain">262144 是 Qwen3.5-9B 的原生上下文，模型卡还建议思考任务尽量保持至少 128K。vLLM recipe 把 BF16 放在约 22GB、单张 24GB 卡上。T4 是 16GB，且不支持 FP8 W8A8 加速（见官方兼容表）。全精度和长上下文会在加载权重或分配 KV 时失败。这张卡用 W4A16 文本权重，上下文从 8192 往上试。</p></div>
       <div class="q"><strong>Q. 第一次请求为什么关掉思考？</strong>
         <p class="explain">Qwen3.5 默认先写思考再回答，短问题也会吐出很长的 reasoning，把 8192 的窗口和 T4 的剩余显存吃掉。打通接口时用 enable_thinking: false。确认服务稳定后，再单独开一次思考，并限制 max_tokens。</p></div>
     </section>
@@ -1091,7 +1091,7 @@ print(resp.choices[0].message.content)</code></pre>
         <li>SGLang：<a href="https://docs.sglang.ai/">docs.sglang.ai</a> · <a href="https://docs.sglang.io/">docs.sglang.io</a> · <a href="https://lmsys.org/blog/2024-01-17-sglang/">LMSYS Radix 博客</a> · <a href="https://github.com/sgl-project/sglang">GitHub</a></li>
         <li>对比：<a href="https://developers.redhat.com/articles/2026/10/14/vllm-vs-sglang-choosing-the-right-inference-engine-for-your-workload">Red Hat 2026-10-14</a> · <a href="https://www.baseten.co/inference-engineering/book/04-software/inference-engines/">Baseten Inference Engines</a></li>
         <li>演示模型：<a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen/Qwen3.5-9B</a> · <a href="https://recipes.vllm.ai/Qwen/Qwen3.5-9B">vLLM recipe</a>（BF16 约 22GB，FP8 约 11GB，单张 24GB） · <a href="https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16">RedHatAI W4A16</a></li>
-        <li>T4 与 FP8：<a href="https://docs.redhat.com/en/documentation/red_hat_ai/3/html/supported_product_and_hardware_configurations/rhaiis-supported-ai-accelerators_supported-configurations">Red Hat AI 加速器表</a>写明 NVIDIA T4 不支持 FP8（W8A8）</li>
+        <li>T4 与 FP8：<a href="https://docs.vllm.ai/en/stable/features/quantization/">vLLM 量化兼容表</a>将 llm-compressor FP8（W8A8）在 Turing 标为不支持；<a href="https://docs.vllm.ai/en/stable/features/quantization/llm_compressor/fp8/">FP8 文档</a>另写 Turing 可走 weight-only FP8（W8A16 / Marlin）。<a href="https://docs.redhat.com/en/documentation/red_hat_ai/3/html/supported_product_and_hardware_configurations/rhaiis-supported-ai-accelerators_supported-configurations">Red Hat AI 加速器表</a>写明 NVIDIA T4 不支持 FP8（W8A8）。本页演示仍用 W4A16</li>
       </ul>
       <div class="callout warn">
         <strong>需再核对：</strong>Qwen3.5 的 vLLM / SGLang 安装行指向 nightly 或主分支，版本每周都可能变。T4 上的 8192 与并发 1 没有在本机实测。SGLang 能否加载这份 W4A16 或混合架构，以当时的报错为准。公开 benchmark 数字请打开原文，本页不固化转录。
@@ -1100,7 +1100,7 @@ print(resp.choices[0].message.content)</code></pre>
 
     <footer>
       <p>图解版：Transformer 前向、注意力权重、一次推理和 Qwen3.5-9B 的 32 层都可以拖动。日期 2026-10-16。</p>
-      <p>文件：<code>/workspace/vllm-sglang-learning-handbook.html</code></p>
+      <p>在线阅读：<a href="https://evenchen6.github.io/vllm-sglang-handbook/">GitHub Pages</a> · 仓库 <a href="https://github.com/evenchen6/vllm-sglang-handbook">evenchen6/vllm-sglang-handbook</a></p>
     </footer>
   </main>
 </div>
@@ -1586,7 +1586,7 @@ print(resp.choices[0].message.content)</code></pre>
     { q: '公开榜几乎无共享前缀时，可能？', opts: ['高估 radix/prefix 收益', '低估 radix/prefix 收益', '不影响', '只影响训练'], a: 1, why: '前缀复用场景的收益不会体现在无重叠流量上。' },
     { q: 'Continuous batching 允许？', opts: ['请求中途加入、完成即离开', '必须等齐固定 batch', '禁止流式', '只能单卡'], a: 0, why: '每 iteration 重组成 batch，提高 GPU 利用率。' },
     { q: '把推理接到推荐网关，优先？', opts: ['重写全部客户端协议', 'OpenAI Compatible base_url', '只能 gRPC 自研', '必须同进程嵌入排序'], a: 1, why: '两引擎都提供 OpenAI 兼容 HTTP，改 base_url 即可起步。' },
-    { q: '单张 16GB T4 上跑 Qwen3.5-9B，起步用？', opts: ['照抄官方 BF16 与 262144 上下文', 'W4A16 文本权重，上下文从短窗口试', '打开 FP8，因为 T4 支持', '两张卡做张量并行'], a: 1, why: 'recipe 把 BF16 标成约 22GB。T4 是 16GB 且不支持 FP8。这张卡用 W4A16，并把上下文降到能启动的长度。' }
+    { q: '单张 16GB T4 上跑 Qwen3.5-9B，起步用？', opts: ['照抄官方 BF16 与 262144 上下文', 'W4A16 文本权重，上下文从短窗口试', '打开 FP8 W8A8，因为 T4 支持', '两张卡做张量并行'], a: 1, why: 'recipe 把 BF16 标成约 22GB。T4 是 16GB 且不支持 FP8 W8A8 加速（见官方兼容表）。这张卡用 W4A16，并把上下文降到能启动的长度。' }
   ];
   const quizBox = $('#quiz-box');
   $('#quiz-total').textContent = questions.length;
@@ -1646,7 +1646,7 @@ print(resp.choices[0].message.content)</code></pre>
     ['TP / PP / DP / EP', '张量 / 流水 / 数据 / 专家 并行。'],
     ['Prefix Caching / APC', '跨请求复用相同 prompt 前缀的 KV。vLLM V1 默认开启 Automatic Prefix Caching。'],
     ['W4A16', '权重量化到约 4bit、激活用 16bit（weight-only，如 AWQ/GPTQ 常见形态）。T4 上用来放下 Qwen3.5-9B。'],
-    ['FP8 / W8A8', '权重与激活（或 KV）用更低位宽；与 weight-only 不是同一口径。'],
+    ['FP8 / W8A8', '权重与激活用更低位宽（如 FP8/INT8 W8A8）；与 weight-only、与单独的 KV Quant 不是同一口径。'],
     ['KV Quant', '量化 KV cache，主要省显存与带宽，不替代权重量化。'],
     ['Speculative Decoding', '草稿模型提议、目标模型验证以加速。'],
     ['Chunked Prefill', '把长 prefill 切块与 decode 交错调度。'],
