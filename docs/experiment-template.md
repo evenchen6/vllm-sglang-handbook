@@ -15,6 +15,10 @@
 | 普通注意力 / GDN 实际内核 | |
 | max-model-len / max-num-seqs / batched tokens | |
 | 显存预算 / CUDA Graph / prefix cache / 状态模式 | |
+| 容器启动到 `/v1/models` 的墙钟时间 | |
+| 注意力块大小 N（启动日志原文） | |
+| Mamba/GDN 模式原文（`none` / `align` / `all`） | |
+| 激活 dtype、KV dtype、注意力后端 | |
 | thinking、采样、输入长度与输出上限 | |
 | 客户端并发 / 是否本机、SSH 隧道 | |
 | 完整启动命令与客户端命令 | |
@@ -29,7 +33,8 @@
 | 客户端 TTFT、首答案时间、E2E | |
 | TPOT 口径 / chunk 间隔口径 | |
 | 输出 token/s 与请求/s | |
-| 显存峰值 / 服务器 preemption / 缓存查询与命中 | |
+| 显存峰值 / 服务器 preemption | |
+| prefix cache queries 与 hits（用 `/metrics` 上的原字段名） | |
 | 原始 JSON、日志位置 | |
 
 ## 对照与结论

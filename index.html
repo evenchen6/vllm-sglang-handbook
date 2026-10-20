@@ -341,7 +341,7 @@
   <nav class="nav" id="nav" aria-label="章节">
     <div class="brand">
       <strong>Transformer → 推理引擎</strong>
-      <span>推荐后台 · 单张 T4 · Qwen3.5-9B · 2026-10-17</span>
+      <span>推荐后台 · 单张 T4 · Qwen3.5-9B · 2026-10-20</span>
     </div>
     <div class="nav-actions">
       <button type="button" id="core-toggle" aria-pressed="false">只看主线</button>
@@ -391,14 +391,14 @@
         <h1>从 Transformer 到 vLLM / SGLang</h1>
         <p class="lede">先看清模型怎么算，再把 KV Cache 从公式算到显存账，然后看 Hugging Face Transformers 怎么加载权重，最后看 vLLM 与 SGLang 怎么把同一份权重做成高吞吐推理服务——并对照推荐后台熟悉的 QPS、缓存与批处理语言。</p>
         <ul class="meta">
-          <li>文档核对日期 2026-10-17</li>
-          <li>同日按 zero-to-sglang 第 4 章加深 KV，并加入屋顶线、采样、批处理、前缀缓存实验</li>
+          <li>文档核对日期 2026-10-20</li>
+          <li>2026-10-17 按 zero-to-sglang 第 4 章加深 KV，并加入屋顶线、采样、批处理、前缀缓存实验</li>
           <li>读者：推荐架构后台</li>
           <li>演示机：单张 NVIDIA T4，16GB</li>
           <li>主模型：Qwen3.5-9B（W4A16 权重 / FP16 激活 / 文本）</li>
           <li>不编造未核实 benchmark</li>
         </ul>
-        <p>接口与默认值随版本变化。每节末尾链到官方页；落地前请再看一次文档顶部版本。口语里的「slang」在本文一律写作 <strong>SGLang</strong>。</p>
+        <p>T4 上的命令固定 <code>vllm/vllm-openai:v0.18.1</code>。混合状态、分页和调度按这一版的启动日志来观察；align、低精度 KV、权重加载和 prefill/decode 分离，按它们解决的问题来学。口语里的「slang」在本文一律写作 <strong>SGLang</strong>。</p>
       </div>
       <div class="layers" aria-label="四层关系">
         <div class="layer-card l1"><b>Transformer 结构</b><span>2017 年注意力模型。Llama、Qwen、BERT、T5 都从这里长出来。</span></div>
@@ -450,7 +450,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         </article>
         <article class="card">
           <h3>阅读约定</h3>
-          <p>安装命令、默认端口、配置项以各项目官方文档为准。文中命令级示例来自 2026-10-17 前后核实过的页面。不编造未核实的吞吐数字；公开对比只给链接与定性结论。标成「T4 起步」的参数不是 GPU 实测结论。实验主线固定模型 revision 与引擎镜像；命令、原理示意与真实测量分别标注。</p>
+          <p>安装命令、默认端口、配置项以各项目官方文档为准。T4 命令固定 v0.18.1。不编造未核实的吞吐数字；正文里的外部测量都给出处，并标明不是这张卡的结果。标成「T4 起步」的参数不是 GPU 实测结论。实验主线固定模型 revision 与引擎镜像；命令、原理示意与真实测量分别标注。</p>
         </article>
       </div>
       <div class="callout ok"><strong>关于 slang：</strong>业界口语里说的 slang，通常指 <strong>SGLang</strong>（Structured Generation Language），常与 vLLM 一起对比的推理引擎。下文一律写 SGLang。</div>
@@ -733,7 +733,9 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <div class="result scoreline" id="kv-est">—</div>
         <p class="explain">默认是 <a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5-9B</a> 模型卡上的全注意力：8 层、4 个 KV 头、头维 256。公式 <code>2 × L × n<sub>kv</sub> × d × tokens × B × bytes</code> 只算这些层的 K 和 V。容量基准默认 15 GiB，贴近 T4 上 nvidia-smi 常见的可见容量，请改成自己的读数。临时工作区、缓存池对齐和 CUDA Graph 都不在公式内，理论合计也不等于实测峰值。长度默认相同；真实请求要用各请求长度之和。</p>
         <p class="explain"><strong>另外 24 层 GDN 每条序列各有一份固定大小的状态。</strong>按 <a href="https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json">config.json</a>，每层递推状态是 32 个 V 头 × 128 × 128，卷积状态是 (16×128×2 + 32×128) × 3。config 里写了 <code>mamba_ssm_dtype: float32</code>，vLLM v0.18.1 会照此把递推状态存成 FP32，卷积状态跟随模型 dtype（这里 FP16）。合起来每层约 2.05 MiB，24 层约 49.1 MiB。它不随上下文变长，但每多一条并发序列就多一份。所以短对话时，GDN 状态比那 8 层 KV 还大。<code>--mamba-ssm-cache-dtype float16</code> 可以减半，vLLM 会打印警告，对输出质量的影响要自己验收。</p>
+        <p class="explain"><strong>要复用前缀，这份滚动状态必须在块边界上留检查点。</strong>下一条请求要从第 i 个 token 接着算，就得有那一层当时的 GDN 状态，而不只是 8 层全注意力的 K、V。<code>align</code> 只在某次调度步刚好结束在块边界时，保存这一步最后一个 token 的状态。APC 也只缓存写满的块，所以两边是同一条边界，命中长度是块大小的整数倍。<code>none</code> 不为复用保存检查点；关掉前缀缓存时就是它。v0.18.1 的配置里还有 <code>all</code>：开前缀缓存且模型支持时，注释写的是在每个块边界都存状态。启动日志若印出 <code>all</code>，照实记下，仍用「命中是不是整块」来判断。更新的服务去掉了 <code>all</code>，开前缀缓存时用 <code>align</code>。要带走的模型是 align。<a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py">v0.18.1 cache 配置</a></p>
         <p class="explain">权重 9.35 GiB 是把<a href="https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/model.safetensors.index.json">固定 revision 的 W4A16 checkpoint</a> 里语言模型部分的张量逐个加起来得到的（不含视觉塔与 MTP）：FFN 与全注意力是 4bit，24 层 GDN 的线性层、Embedding、LM Head 仍是 16 位。T4 上 15 GiB × 0.85 的预算里，留给 KV、GDN 状态与激活的大约只有 3.4 GiB。</p>
+        <p class="explain"><strong>低精度 KV 压的是公式里的「字节/元素」，不是权重。</strong>从 2 改成 1，同样的上下文少搬一半历史。Decode 吃带宽时，这换上下文长度和逐步延迟，同时要验收质量，还要有这块 GPU 上的内核。T4 起步把 <code>--kv-cache-dtype</code> 留在 <code>auto</code>，跟随 FP16，避免和 W4A16、GDN 搅在一起。更新的服务会在更新的 GPU 上把 FP8 或 4-bit KV 做成某些模型的默认。你在日志里要分开看的三件套始终是：权重 dtype、KV dtype、GDN 递推 dtype。</p>
         <p class="explain">对一下原文例题：把 L、KV 头、头维、T、l、B 改成 36、8、128、100、0、1，字节选 BF16，GDN 层数改成 0（那是纯全注意力模型）。Prefill 与「再生成 l 个之后」都应约为 14.06 MiB，每步新增显示 144.0 KiB（约 0.14 MiB）。滑条从 256 起步，这一题改数字框；再拖滑条会把 T 吸到 256 的倍数。那一章用的是 Qwen3-4B-Thinking-2507，不是本页默认的 9B。</p>
       </div>
       <h3>一次请求的生命周期</h3>
@@ -832,6 +834,11 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         </tbody>
       </table>
       <div class="callout warn">压测须固定：模型、精度、长度分布、前缀是否共享、是否流式、硬件。公开榜若几乎无共享前缀，会低估 RadixAttention / prefix cache（见 Red Hat 文提醒）。</div>
+      <h3>两段时间，和两种机器形态</h3>
+      <p>长 prefill 偏算力，小 batch decode 偏带宽。挤在同一次调度里时，一个长 prompt 会把正在吐字的请求的 token 间隔拉长。T4 上能看到的是：<code>max-num-seqs=1</code> 时后来的请求只能排队；调高之后，chunked prefill 让 prefill 和 decode 共享同一步。同时记下 TTFT 和逐步间隔，看变的是哪一项。</p>
+      <p>把 prefill 和 decode 放到不同实例，是同一冲突的多机形态。prefill 池对着 TTFT，decode 池对着每人每秒 token，代价是把算好的 KV 送过去。收益出现在重算这段 prompt 比搬走 KV 更贵的长输入上。SGLang 在长 prompt 的 PD 负载上报告过吞吐最多增加 27%、p95 TTFT 降到约一半；那是他们的测量，单张 T4 拆不开。<a class="cite" href="https://github.com/sgl-project/sglang/releases/tag/v0.5.22">出处</a></p>
+      <p>更早还有一段等待：权重从磁盘进 GPU，到服务就绪为止。它不是请求的 TTFT。本实验会为了只改一个变量而反复重启，所以要把这段墙钟时间单独记下。SGLang 的 InstantTensor 加载器针对这一段；项目称大约快 10 倍，同页例子是 DeepSeek-R1、8×H200、50 GB/s 存储，从 160 s 到 15.3 s。不是 Qwen3.5-9B，也不是 T4。</p>
+      <p>屋顶线没算 kernel 启动和卡间通信。一个用户、或推测解码一次只验证几行 token 时，每颗 kernel 的算术很少，时间花在等待上一颗写完，以及 all-reduce 上。高端 GPU 上的低延迟内核用依赖启动提前拉起下一颗 kernel，并把 all-reduce 叠进 GEMM 的收尾；也有把一整层收成一两次常驻 kernel 的做法。需要专用内核，T4 实验不跑。和第 14、15 节一起看。</p>
     </section>
 
     <section class="chapter" id="hf" data-core="1">
@@ -935,8 +942,8 @@ docker run --rm --gpus device=0 --ipc=host \
         <p class="explain" id="mem-note">连续模式下，未用满的预留也会占格；分页模式只标记真正写入的块。颜色 A/B/C 表示不同请求。</p>
       </div>
       <p>分页之后仍有两类浪费：每条请求最后一页没写满（内部碎片，平均约半页）；以及被前缀缓存留着、暂时没人用的页（可被淘汰）。多条请求共享同一段前缀时，可以让各自的块表指向同一批物理页，用引用计数管理；有人要在共享页上继续写时，再复制一份（copy-on-write）。</p>
-      <div class="callout warn"><strong>在你的 9B 上，一页不是 16 个 token。</strong>vLLM 默认块大小是 16，但 Qwen3.5 是混合模型：KV 池里的一页还要能装下一层 GDN 状态（递推部分按 config 存 FP32，约 2.05 MiB）。按 <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py">v0.18.1 源码</a>的规则，不开前缀缓存时块大小 = 16 × ⌈2.05 MiB ÷ (16 × 4 KiB)⌉ = <strong>528 个 token</strong>；开了前缀缓存还可能按内核要求再调，改用 FP16 状态则约 272。启动日志里会打印「Setting attention block size to N tokens」，以那一行为准。块越大，尾页碎片越大，前缀缓存的命中粒度也越粗（第 18 节）。</div>
-      <p>分页式 KV 如今已成为现代引擎标配（SGLang 也采用同类思路）。vLLM 的差异化更多转向广模型 / 广硬件生态与工程完备度（见 Red Hat 2026-10-14 文）。<a class="cite" href="https://docs.vllm.ai/en/stable/design/hybrid_kv_cache_manager/">vLLM 混合 KV 缓存设计</a></p>
+      <div class="callout warn"><strong>在你的 9B 上，一页不是 16 个 token。</strong>vLLM 默认块大小是 16，但 Qwen3.5 是混合模型：这一页还要放下 GDN 状态检查点（递推部分按 config 存 FP32，约 2.05 MiB）。检查点不随 token 变小，所以块被调大。按 <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py">v0.18.1 源码</a>，不开前缀缓存时块大小 = 16 × ⌈2.05 MiB ÷ (16 × 4 KiB)⌉ = <strong>528 个 token</strong>；开了前缀缓存还可能按内核要求再调，改用 FP16 状态则约 272。启动日志里的「Setting attention block size to N tokens」就是复用粒度。<code>align</code> 把 GDN 检查点放在写满的这一页上，命中长度是 N 的整数倍（第 7、18 节）。块越大，尾页碎片越大。</div>
+      <p>分页式 KV 如今已成为现代引擎标配（SGLang 也采用同类思路）。vLLM 的差异化更多转向广模型 / 广硬件生态与工程完备度（见 Red Hat 2026-10-14 文）。<a class="cite" href="https://docs.vllm.ai/en/v0.18.1/design/hybrid_kv_cache_manager/">v0.18.1 混合 KV 缓存设计</a></p>
     </section>
 
     <section class="chapter" id="batch" data-core="1">
@@ -970,6 +977,10 @@ docker run --rm --gpus device=0 --ipc=host \
         <li><strong>Chunked prefill：</strong>超长 prefill 切块，与 decode 交错，避免饿死正在吐字的请求。</li>
         <li><strong>Preemption：</strong>KV 不够时抢占并释放，之后重算。频繁抢占会伤延迟（vLLM Optimization 文档有说明）。</li>
       </ul>
+      <h3>小 batch 的延迟，和吞吐内核不是同一类优化</h3>
+      <p>第 8 节的屋顶线：并发从 1 往上加，读权重的成本被摊薄，总吞吐上升，单条请求的逐步时间几乎不变，直到 KV 读取或算力追上。吞吐内核按这个方向做大 tile、一次喂很多 token。延迟内核对着相反的角：一个用户，或推测解码一次只验证几行，kernel 太小，GPU 在两次启动之间空等。</p>
+      <p>依赖启动（programmatic dependent launch，PDL）让下一颗 kernel 在输入还没就绪时就启动，先摆好屏障、装上权重，真正用到数据时再等。张量并行里，GEMM 算完一块就把部分和发给对端，通信叠在后面几块的计算上，而不是等整颗 GEMM 写回显存再另起一颗 all-reduce。AMD 上的 monokernel 更进一步：一层里几十个小 kernel 收成两次常驻启动，all-reduce 做在核内。<a class="cite" href="https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode">LMSYS 低延迟内核</a>把这两类做成插件（NVIDIA 的 sgl-nvidia-mega、AMD 的 sgl-amd-mono），服务的是 DeepSeek-V4.1-Flash 加 DSpark。文中 AgentX 回放、与同硬件基线相比：四张 GB300、1 路并发，P90 每用户生成速度从 671.2 tok/s 到 928.4 tok/s（1.38×）；四张 MI355X、4 路并发，从 331.6 tok/s 到 516.0 tok/s（1.56×）。需要这类 GPU 和专用内核，T4 实验不跑。</p>
+      <p>T4 上对应的观察在并发实验里：同时记下 TTFT 和 token 间隔。并发升高后若 TTFT 变差、间隔几乎不变，你看到的是排队和 prefill 干扰。单卡上的这点干扰，就是多机上把 prefill、decode 拆开要消除的那件事。</p>
     </section>
 
     <section class="chapter" id="more">
@@ -982,11 +993,11 @@ docker run --rm --gpus device=0 --ipc=host \
         <label class="got"><input type="checkbox" data-got="more"> 这节能复述</label>
       </header>
       <div class="grid-3">
-        <article class="card"><h3>Prefix caching</h3><p>跨请求复用相同 prompt 前缀的 KV。<strong>vLLM V1 默认开启</strong> Automatic Prefix Caching（关闭：<code>--no-enable-prefix-caching</code>）；SGLang <strong>默认开启</strong> RadixAttention（关闭：<code>--disable-radix-cache</code>）。两边都是默认复用，差在索引结构与调度重心，不是「手开 vs 自动」。</p></article>
+        <article class="card"><h3>Prefix caching</h3><p>跨请求复用相同 prompt 前缀的 KV。<strong>vLLM V1 默认开启</strong> Automatic Prefix Caching（关闭：<code>--no-enable-prefix-caching</code>）；SGLang <strong>默认开启</strong> RadixAttention（关闭：<code>--disable-radix-cache</code>）。两边都是默认复用，差在索引结构与调度重心，不是「手开 vs 自动」。混合模型还要在同一块边界上留下 GDN 检查点，这就是 <code>align</code>；<code>none</code> 只剩注意力 KV 的命中条件，状态接不回去。</p></article>
         <article class="card"><h3>量化</h3><p>分清三口径，别混为一谈：<strong>Weight-only</strong>（如 W4A16 / AWQ / GPTQ：权重低压，激活多为 16bit）；<strong>W8A8</strong>（如 FP8/INT8 权重与激活量化；FP8 也可能仅用于权重或 KV）；<strong>KV quant</strong>（压 KV cache）。都换显存与带宽，需业务验收质量。T4 不支持 FP8 W8A8 加速（见官方兼容表）；这张卡的 9B 演示用 W4A16。</p></article>
-        <article class="card"><h3>Speculative decoding</h3><p>草稿模型提议、目标模型验证，加速 decode。以当前版本文档为准。</p></article>
+        <article class="card"><h3>Speculative decoding</h3><p>草稿模型一次提议多个 token，目标模型在同一步里验证，接受则少做几次逐 token 的 decode。验证步往往只有几行，所以它和第 14 节的小 batch 延迟内核是同一类负载：算术少，启动和通信的空等占比高。T4 实验不启推测解码，也不装那些插件。</p></article>
       </div>
-      <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制模型抬吞吐；<strong>EP</strong> 切 MoE expert。</p>
+      <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制整份模型抬吞吐；<strong>EP</strong> 切 MoE expert。注意力数据并行是另一旋钮：多张卡上把不同请求的注意力分开算，份数不等于模型副本数。阅读服务参数时找这个份数（新文档写作 <code>--attn-dp-size</code>），不要把旧的布尔开关当成还要手写的步骤。单张 T4 用不到。</p>
     </section>
 
     <section class="chapter" id="proc" data-core="1">
@@ -1013,11 +1024,13 @@ docker run --rm --gpus device=0 --ipc=host \
         <article class="card"><h3>在线：<code>vllm serve</code></h3><p>OpenAI 兼容 HTTP，默认端口常见 8000。适合接推荐网关。</p></article>
         <article class="card"><h3>离线：<code>LLM.generate</code></h3><p>Python 批推理。Instruct 模型需自行套 chat template 或用 <code>llm.chat</code>。</p></article>
       </div>
+      <p>在线接口不止对话补全。智能体还要在结构化状态上做选择、打分、判断「没有」，这些不必先生成一段自由文本再自己切。所以服务会加决策端点，并把思考段和工具调用交给解析器。本实验的 <code>--reasoning-parser qwen3</code> 按 Qwen 模板切开 <code>reasoning</code> 和 <code>content</code>。更新的服务还可以用通用的 <code>hf</code> 解析器去读 checkpoint 自带的 <code>response_template</code>，少维护一套模型专用解析器；也有 <code>/v1/systemone</code> 这种对结构化状态回答 choice、noul、score 的端点。0.18.1 镜像没有这些路径。这次要看懂的是同一件事：流里的两种字段，以及 <code>finish_reason</code> 是正常结束还是顶到长度上限。</p>
     </section>
 
     <section class="chapter" id="vllm-run" data-core="1">
       <header class="ch-h"><span class="num">17</span><div><p class="eyebrow">T4 主实验</p><h2>Qwen3.5-9B W4A16：启动与关键旋钮</h2></div></header>
       <p>固定 <code>vllm/vllm-openai:v0.18.1</code>，依据是 RedHatAI 量化模型卡列出的服务评估版本；它不是声称最新或最快。模型 revision 也固定在启动脚本中。先按 <a href="docs/t4-qwen35-lab.md">实验指南</a>确认驱动、容器 GPU 与 FP16 可用，避免混装 PyTorch/CUDA。</p>
+      <p>把两段时间分开。从容器启动到 <code>/v1/models</code> 返回，主要是读权重、分配缓存和编译，只在重启时发生。之后每条请求的 TTFT 才是 prefill。指南一次只改一个变量，会反复重启，加载时间很容易被当成模型变慢。记下这段墙钟时间，不要写进 tok/s。</p>
       <pre><code># 完整默认命令先查看，不下载、不启动
 DRY_RUN=1 bash scripts/serve-vllm-t4.sh
 
@@ -1035,7 +1048,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <tr><td><code>--max-num-seqs 1</code></td><td>单调度步的序列上限</td><td>客户端并发 4 不等于引擎同时执行 4 条</td></tr>
         <tr><td><code>--max-num-batched-tokens 1024</code></td><td>每步 token 预算</td><td>配合 chunked prefill；调小时可能改善 decode 干扰，也会改变 TTFT</td></tr>
         <tr><td><code>--enforce-eager</code></td><td>先关闭 CUDA Graph</td><td>用于排障，不能把这组性能当成引擎上限</td></tr>
-        <tr><td><code>--no-enable-prefix-caching</code></td><td>首次运行关闭前缀复用</td><td>后续单独开关对照；混合模型要核对状态缓存模式</td></tr>
+        <tr><td><code>--no-enable-prefix-caching</code></td><td>首次运行关闭前缀复用</td><td>对照时看日志里的块大小和 Mamba 模式：<code>align</code> 把 GDN 检查点放在满块上；<code>none</code> 不保存。<code>all</code> 只按日志原文记录</td></tr>
       </tbody></table>
       <pre><code># 并发调度实验：停掉旧容器后重新启动
 MAX_SEQS=4 bash scripts/serve-vllm-t4.sh
@@ -1081,25 +1094,26 @@ python3 examples/stream-bench.py --requests 12 --concurrency 4 \
         </tbody>
       </table>
       <p>普通注意力的物理 KV 可按页存放；Radix 树通常在 CPU 上维护 token 前缀到缓存的索引。分页负责存储管理，Radix 负责查找与复用，也可共享物理页。缓存命中要求连续 token 前缀相同，并满足模型、位置与相关配置约束；不是任意相同句子都能复用。Qwen3.5 还需一致的 GDN 状态检查点，不能只复用那 8 层的 KV。</p>
-      <div class="callout"><strong>把实验室里的「块 = 4」换成你的配置。</strong>vLLM 的 APC <a href="https://docs.vllm.ai/en/stable/design/prefix_caching.html">只缓存写满的块</a>，命中按整块计；SGLang 的 <code>--page-size</code> 默认是 1，按 token 命中，淘汰策略默认 LRU（<a href="https://docs.sglang.io/docs/advanced_features/server_arguments">服务参数文档</a>）。第 13 节算过，vLLM 跑 Qwen3.5-9B 时块会被调到几百个 token。所以第 19 节的前缀实验里，共享的 system 段要比一块长得多才看得到命中，并且命中长度会是块大小的整数倍；先在启动日志里查到实际块大小，再决定 <code>--prefix-lines</code>。</div>
+      <div class="callout"><strong>把实验室里的「块 = 4」换成你的配置。</strong>vLLM 的 APC <a href="https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html">只缓存写满的块</a>，命中按整块计；SGLang 的 <code>--page-size</code> 默认是 1，按 token 命中，淘汰策略默认 LRU（<a href="https://docs.sglang.io/docs/advanced_features/server_arguments">服务参数文档</a>）。第 13 节算过，vLLM 跑 Qwen3.5-9B 时块会被调到几百个 token，因为这一页还要放下 GDN 检查点。<code>align</code> 把检查点放在写满的块上；<code>none</code> 则不为复用保存它。本镜像的日志可能印出 <code>all</code>，照实记录，判断标准仍是命中长度是否为块大小的整数倍。第 19 节的前缀实验里，共享的 system 段要比一块长得多；先在启动日志里查到实际块大小，再决定 <code>--prefix-lines</code>。</div>
     </section>
 
     <section class="chapter" id="sglang-run" data-core="1">
-      <header class="ch-h"><span class="num">19</span><div><p class="eyebrow">进阶对照</p><h2>SGLang 与混合模型的前缀实验</h2></div></header>
-      <p>先完成 9B 在 vLLM 上的体验与计时，再挑战 SGLang。不能拿旧版本支持 T4 的结论，直接证明当前版本也能运行 Qwen3.5 的 GDN、量化与普通注意力路径。当前官方安装页与 Qwen 模型卡的主分支命令并非同一套固定环境。</p>
-      <p>本项目没有经过 T4 验证的 SGLang 9B 配置，因此不再把 BF16、262144 上下文的命令放在主线让人照抄。按 <a href="https://docs.sglang.io/docs/get-started/install">SGLang 安装文档</a>和 <a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5 模型卡</a>选择兼容版本，记录 commit/镜像 digest。先查模型加载器、W4A16、FP16、GDN 和 SM75 支持，再调上下文。</p>
+      <header class="ch-h"><span class="num">19</span><div><p class="eyebrow">进阶对照</p><h2>主线做完之后，怎样读 SGLang</h2></div></header>
+      <p>先在 vLLM 上做完前缀对照，再读 SGLang。本项目没有 T4 + Qwen3.5-9B W4A16 的 SGLang 配方。不能拿「某版本支持 T4」证明这份 checkpoint 的 GDN、量化和 FP16 都能加载。安装页上的 BF16、262144 上下文命令不要照抄。</p>
+      <div class="callout ok"><strong>先在已跑通的 vLLM 上完成前缀对照，并留下这些数：</strong>
+        <ol><li>停服务并以 <code>PREFIX_CACHE=0</code> 启动，固定长 system 前缀，只改 user 后缀。</li>
+        <li>预热后顺序请求；用 <code>--shared-prefix</code> 保存 TTFT。同时记下容器启动到 <code>/v1/models</code> 的墙钟时间，不要混进 TTFT。</li>
+        <li>停服务，以 <code>PREFIX_CACHE=1</code> 重启同一 checkpoint，再预热、测量。</li>
+        <li>从启动日志抄下块大小 N、Mamba/GDN 模式原文、激活 / KV dtype、注意力后端。按 <code>align</code> 理解复用：检查点在满块上。<code>none</code> 表示没有这份检查点。日志若是 <code>all</code>，照实记录。</li>
+        <li>从 <code>/metrics</code> 抄下 prefix cache 的 queries 与 hits，用原字段名。命中长度应是 N 的整数倍。没有命中或请求短于 N，就记成这次没有复用。</li></ol>
+      </div>
+      <p>然后只回答四个是否：加载器能否读这份 W4A16、能否强制 FP16、GDN 在 SM75 上有没有内核、上下文能不能先收到 4096。有一项不成立就停。若某一版确实用同一 checkpoint 起了服务，用下面的客户端，并只比三段：就绪时间、同一条 shared-prefix 的 TTFT 与命中、并发升高时 TTFT 和 token 间隔谁在变。</p>
       <pre><code># 仅在你已成功启动、确认 model id 的 SGLang 服务后执行
 python3 examples/stream-bench.py \
   --base-url http://127.0.0.1:30000/v1 \
   --model YOUR_SERVED_MODEL_ID \
   --requests 1 --warmup 0 --show-output</code></pre>
-      <div class="callout ok"><strong>先在已跑通的 vLLM 上完成前缀对照：</strong>
-        <ol><li>停服务并以 <code>PREFIX_CACHE=0</code> 启动，固定长 system token 前缀，只改 user 后缀。</li>
-        <li>预热后顺序请求；使用 <code>--shared-prefix</code> 保存 TTFT 与服务器缓存指标。</li>
-        <li>停服务，以 <code>PREFIX_CACHE=1</code> 重启同一 checkpoint 和配置，再预热、测量。</li>
-        <li>查看启动日志中的实际 prefix cache 与 Mamba/GDN 状态策略；开关被禁用、没有命中或不支持时，不能写成缓存有效/无效的性能结论。</li></ol>
-      </div>
-      <p>跨引擎比较必须固定相同 checkpoint/revision、精度、长度分布、采样、上下文、硬件和前缀条件。不同模型只能分别记录。APC/Radix 主要节省重复 prefill，不会消除长上下文下每个新 token 读取历史的成本。</p>
+      <p>快加载器改变的是就绪时间。SGLang 的 InstantTensor 在 DeepSeek-R1、8×H200 上有一组从 160 s 到 15.3 s 的测量，并称为大约 10 倍；拿来理解「加载和 TTFT 要分开」，不要当成 9B 在 T4 上的预期。PD 分离改变的是长 prefill 会不会挡住 decode，单卡做不到；你在第 14 节看到的干扰就是它要拆开的那件事。低延迟插件要 GB300 / MI355X 这一档，不要在 T4 上打开。两引擎都用同一 checkpoint、精度、长度、采样和前缀跑通之前，不比吞吐。</p>
     </section>
 
     <section class="chapter" id="choose" data-core="1">
@@ -1124,6 +1138,7 @@ python3 examples/stream-bench.py \
       <a href="https://developers.redhat.com/articles/2026/10/14/vllm-vs-sglang-choosing-the-right-inference-engine-for-your-workload">vLLM vs SGLang</a>。本文不转录具体吞吐数字。</p>
       <p><strong>Baseten §4.3</strong>：vLLM / SGLang 易用、模型日更广；TRT-LLM 上限高更难；按部署选择。
       <a href="https://www.baseten.co/inference-engineering/book/04-software/inference-engines/">Inference Engines</a></p>
+      <p>和 T4 实验对齐时，先比四项：就绪时间、同一条 shared-prefix 的 TTFT、块大小与命中计数、并发升高后 TTFT 和 token 间隔谁在变。快加载器只动第一项。PD 分离动的是第四项里的 prefill 干扰，单张 T4 拆不开。本仓库没有这份 W4A16 在 T4 上的 SGLang 配方。</p>
       <div class="callout ok"><strong>实践：</strong>同一套录制流量（含真实 system 与多轮）在相同 GPU 上画「并发–TTFT p95–输出 tok/s」，再看运维成本。不要只看明星榜。</div>
     </section>
 
@@ -1145,7 +1160,7 @@ python3 examples/stream-bench.py \
         <li>路由 / A/B：served-model-name 或网关键</li>
       </ul>
       <h3>监控最小集</h3>
-      <p>TTFT、TPOT/ITL、端到端延迟、队列长度、GPU util、显存、preemption 次数、缓存命中率（若有）。</p>
+      <p>TTFT、TPOT/ITL、端到端延迟、队列长度、GPU util、显存、preemption 次数、缓存命中率（若有）。进程就绪时间和请求 TTFT 分成两条，避免一次重启的加载被记成首包变慢。命中率用服务实际导出的 queries 与 hits 计算，字段名以 <code>/metrics</code> 为准。</p>
       <table>
         <thead><tr><th>现象</th><th>常见原因</th><th>方向</th></tr></thead>
         <tbody>
@@ -1162,9 +1177,9 @@ python3 examples/stream-bench.py \
       <div class="grid-2">
         <article class="card"><h3>周 1 · 真实问答与基本链路</h3><p>先尝试 9B W4A16 非思考模式，观察中文输出。在第 5 节把注意力五步和 GQA 拖一遍，在第 5A 节比较贪心和 Qwen3.5 建议的采样参数。讲清 token/template、logits/采样与首 token；对照普通注意力和 Qwen3.5 的 GDN，不要求一开始推导 GDN。对照读 <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第4章_推理的核心数据结构入门.html">zero-to-sglang 第 4 章</a>，分清缓存的是 K、V。</p></article>
         <article class="card"><h3>周 2 · 前向与显存</h3><p>可选用同代 4B 跑 5 步前向观测，比较有无 cache 的输入长度。用第 7 节写出 Prefill 结束、Decode 每步、再生成 l 个之后，并填入权重 9.35 GiB 和 GDN 状态，容量基准改成 nvidia-smi 的读数。用第 8 节的屋顶线算出单条 decode 的理论上限，再和实测比，差距就是 kernel 效率与框架开销。区分模型加载 OOM 和运行 OOM。</p></article>
-        <article class="card"><h3>周 3 · 流式与调度</h3><p>先在第 14 节对比静态批和连续批。再用同一 9B checkpoint，客户端并发 1/2/4；同步记录引擎 max-num-seqs。用屋顶线预测：带宽受限时总吞吐应近似随并发增长，若没有，查 max-num-seqs、prefill 干扰与 KV 读取。先排除编译与冷启动，保存 TTFT、首答案时间、E2E、输出 token/s、长度和失败数。</p></article>
-        <article class="card"><h3>周 4 · 前缀开关对照</h3><p>先在启动日志里找到实际块大小，按第 18 节确定共享前缀要多长。同一长 system 前缀，改变 user 后缀；顺序预热后对比 PREFIX_CACHE=0/1。确认混合状态缓存真实启用，结合缓存命中指标解释变化，命中长度应是块大小的整数倍。</p></article>
-        <article class="card"><h3>周 5 · 每次只调一项</h3><p>先比较上下文 4096/8192，再比较 CUDA Graph 开关、token 预算。条件允许再做 SGLang 同模型对照；无法兼容就记录限制，不用不同模型制造引擎胜负。</p></article>
+        <article class="card"><h3>周 3 · 流式与调度</h3><p>先在第 14 节对比静态批和连续批，并读完小 batch 延迟与 prefill/decode 冲突。再用同一 9B checkpoint，客户端并发 1/2/4；同步记录引擎 max-num-seqs。用屋顶线预测：带宽受限时总吞吐应近似随并发增长。同时看 TTFT 和 token 间隔谁在变。低延迟插件不在 T4 上跑。先排除编译与冷启动，保存 TTFT、首答案时间、E2E、输出 token/s、长度和失败数。</p></article>
+        <article class="card"><h3>周 4 · 前缀开关对照</h3><p>先在启动日志里找到块大小 N 和 Mamba 模式。按 <code>align</code> 理解：GDN 检查点落在写满的块上，共享前缀要比 N 长，命中长度是 N 的整数倍。日志若是 <code>all</code>，照实记录，判断标准不变；<code>none</code> 表示没有这份检查点。顺序预热后对比 PREFIX_CACHE=0/1，并抄下 <code>/metrics</code> 的 queries 与 hits。</p></article>
+        <article class="card"><h3>周 5 · 每次只调一项</h3><p>先比较上下文 4096/8192，再比较 CUDA Graph 开关、token 预算。若接着看 SGLang，按第 19 节把 vLLM 的就绪时间、块大小、状态模式、命中计数和 shared-prefix TTFT 抄下来，再逐项核对 W4A16、FP16、GDN 与 SM75。对不上就停，不另写一份配方。</p></article>
         <article class="card"><h3>周 6 · 思考与服务接入</h3><p>单独开启思考，观察 reasoning 首包和最终答案时间；检查 length 截断。写网关首包/总超时、流式取消与 OOM 处理，不把短窗口直接等同于能力下降。</p></article>
       </div>
       <p>每次输出：<a href="docs/experiment-template.md">环境与结果记录</a> + 原始 JSON + 一条由数据支持的结论。几次请求的 p95 仅供冒烟，不作为性能宣传。命令和排障见 <a href="docs/t4-qwen35-lab.md">T4 指南</a>。</p>
@@ -1210,6 +1225,8 @@ python3 examples/stream-bench.py \
         <p class="explain">不能。它是只看带宽和峰值算力的理论上界，没算反量化、kernel 效率、调度和 Python 开销，也没在 T4 上实测。用法是先预测，再拿实测对比：差得越多，越值得去 profile。</p></div>
       <div class="q"><strong>Q. Qwen3.5 支持 262144，T4 为什么先用 4096？</strong>
         <p class="explain">模型能力上限不等于本机可承载容量。4096 是保守实验值，不是模型原生上限；输入与输出合计不能超过它。9B BF16 仅按 9B×2 字节估算就约 18GB，超过 T4 标称容量，尚未计算视觉部分与运行开销。因此主线选 W4A16；更长窗口要实测预算后再增加。</p></div>
+      <div class="q"><strong>Q. T4 实验要换成更新的引擎镜像吗？</strong>
+        <p class="explain">不用。启动命令保持指南里的 v0.18.1。align、块大小、三种 dtype、就绪时间和 TTFT、prefill 与 decode 的冲突，在第 7、8、13、14 节和实验第 6 步里观察。换镜像是另一组实验，结果分开记。</p></div>
       <div class="q"><strong>Q. 关掉思考会改变模型吗？</strong>
         <p class="explain">不会更换 checkpoint。模板的 enable_thinking 控制生成方式，reasoning parser 负责解析字段，二者不同。短窗口不自动让短问题变差；当实际推理/回答需要更长输出却被 max_tokens 或上下文截断时，结果才可能不完整。</p></div>
     </section>
@@ -1238,7 +1255,8 @@ python3 examples/stream-bench.py \
       <ul>
         <li>KV 生命周期与显存账：Datawhale × RadixArk <a href="https://github.com/datawhalechina/zero-to-sglang">zero-to-sglang</a>（CC BY-NC-SA 4.0）。本手册引用并自行复述问题，不转载章节正文。<a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第4章_推理的核心数据结构入门.html">第 4 章 推理的核心数据结构入门</a> · <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第2章_推理入门.html">第 2 章</a> · <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第5章_Benchmark入门.html">第 5 章</a> · <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part2/第4章_KVCache优化.html">Part II KV Cache</a></li>
         <li>硬件与模型数字：<a href="https://www.nvidia.com/en-us/data-center/tesla-t4/">NVIDIA T4 规格</a>（FP16 65 TFLOPS、320+ GB/s、16 GB） · <a href="https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json">Qwen3.5-9B config.json</a> · <a href="https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/model.safetensors.index.json">W4A16 固定 revision 的张量索引</a>（权重 10.04 GB 由各分片 safetensors 头逐个求和，不含视觉塔与 MTP）</li>
-        <li>vLLM 内部：<a href="https://docs.vllm.ai/en/stable/design/prefix_caching.html">APC 设计（只缓存满块、LRU）</a> · <a href="https://docs.vllm.ai/en/stable/design/hybrid_kv_cache_manager/">混合 KV 缓存管理</a> · <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py">v0.18.1 混合模型块大小</a> · <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/layers/mamba/mamba_utils.py">v0.18.1 GDN 状态形状与 dtype</a></li>
+        <li>vLLM 内部：<a href="https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html">v0.18.1 APC 设计（只缓存满块、LRU）</a> · <a href="https://docs.vllm.ai/en/v0.18.1/design/hybrid_kv_cache_manager/">v0.18.1 混合 KV 缓存管理</a> · <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py">v0.18.1 混合模型块大小</a> · <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/layers/mamba/mamba_utils.py">v0.18.1 GDN 状态形状与 dtype</a> · <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py">v0.18.1 的 none / all / align</a>。更新服务去掉 <code>all</code>、开前缀缓存时用 <code>align</code>，见 <a href="https://github.com/vllm-project/vllm/releases/tag/v0.32.0">v0.32.0 说明</a>；实验以 0.18.1 日志为准</li>
+        <li>加载、PD 与低延迟内核：<a href="https://github.com/sgl-project/sglang/releases/tag/v0.5.22">SGLang 对 InstantTensor 与 PD 的报告</a> · <a href="https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode">LMSYS 低延迟模式</a>。文中的 10 倍、27% 和 AgentX 数字来自这两页，不是 T4 实测</li>
         <li>SGLang：<a href="https://docs.sglang.io/docs/advanced_features/server_arguments">服务参数</a>（<code>--page-size</code> 默认 1，<code>--radix-eviction-policy</code> 默认 lru）</li>
         <li>Transformer 论文：<a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a></li>
         <li>HF Transformers：<a href="https://huggingface.co/docs/transformers">文档</a> · <a href="https://github.com/huggingface/transformers">GitHub</a></li>
@@ -1254,7 +1272,7 @@ python3 examples/stream-bench.py \
     </section>
 
     <footer>
-      <p>图解与实验版：整模型前向、注意力五步与 GQA、采样、KV 生命周期与混合缓存账、T4 屋顶线、静态/连续批、分页块表、Radix 与 APC 都可以拖动或单步。KV 一节按 zero-to-sglang 第 4 章加深。日期 2026-10-17。</p>
+      <p>图解与实验版：整模型前向、注意力五步与 GQA、采样、KV 生命周期与混合缓存账、T4 屋顶线、静态/连续批、分页块表、Radix 与 APC 都可以拖动或单步。KV 一节按 zero-to-sglang 第 4 章加深。实验命令固定 v0.18.1。日期 2026-10-20。</p>
       <p>在线阅读：<a href="https://evenchen6.github.io/vllm-sglang-handbook/">GitHub Pages</a> · 仓库 <a href="https://github.com/evenchen6/vllm-sglang-handbook">evenchen6/vllm-sglang-handbook</a></p>
     </footer>
   </main>
@@ -2350,6 +2368,7 @@ python3 examples/stream-bench.py \
     { q: 'T4 带宽 320 GB/s，9B W4A16 每个 decode 步要读约 8 GB 权重。单条请求的理论上限约？', opts: ['约 4 tok/s', '约 40 tok/s', '约 400 tok/s', '约 4000 tok/s'], a: 1, why: '8 GB ÷ 320 GB/s ≈ 25 ms 一步，每步每条序列只出 1 个 token，所以不超过约 40 tok/s。反量化与 kernel 效率会让实测更低。' },
     { q: '仍处在带宽受限区时，并发从 1 提到 8，理论上？', opts: ['单条请求快 8 倍', '每步时间几乎不变，总吞吐接近 8 倍', '总吞吐不变', '每步时间变成 8 倍'], a: 1, why: '权重每步只读一遍，被这一步的所有序列共用。在 KV 读取或算力追上来之前，加并发主要抬总吞吐，单条请求速度基本不变。' },
     { q: 'vLLM APC 块大小 4，两个请求前 10 个 token 相同，新请求最多复用？', opts: ['10 个', '8 个', '4 个', '0 个'], a: 1, why: 'APC 只缓存写满的块，命中按整块计：前两块 8 个 token 命中，第三块只有 2 个相同，整块不算。' },
+    { q: '混合模型要让 GDN 状态和 KV 一起复用，检查点落在哪？', opts: ['任意一个 token', '写满的块边界（align）', '只复用 Q', '和块大小无关'], a: 1, why: 'align 在调度步结束于块边界时保存递推状态，和 APC 的满块是同一条边界。none 不为复用保存这份状态。' },
     { q: 'Qwen3.5-9B 一层全注意力有 16 个 Q 头、4 个 KV 头。KV cache 和每头各存一份相比？', opts: ['一样大', '1/4', '4 倍', '1/16'], a: 1, why: 'GQA 让每 4 个 Q 头共用一组 K、V，缓存只存 4 组：每层每 token 4 KiB，而不是 16 KiB。' },
     { q: 'GDN 层每条序列的状态随上下文长度？', opts: ['线性增长', '不变，24 层合计约 49 MiB', '平方增长', '为 0'], a: 1, why: '递推状态是固定的 32 × 128 × 128（config 指定 FP32），加上很小的卷积状态；不随长度涨，但每多一条并发序列就多一份。' },
     { q: '单张 16GB T4 上跑 Qwen3.5-9B，起步用？', opts: ['照抄官方 BF16 与 262144 上下文', 'W4A16 文本权重，上下文从短窗口试', '打开 FP8 W8A8，因为 T4 支持', '两张卡做张量并行'], a: 1, why: 'T4 上主线尝试 W4A16 权重、FP16 激活与短上下文；权重容量、量化内核和 GDN 兼容性需分别验证。配置未实测，不保证启动成功。' }
@@ -2426,6 +2445,9 @@ python3 examples/stream-bench.py \
     ['OpenAI Compatible', '提供 /v1/chat/completions 一类 HTTP 接口。'],
     ['Qwen3.5-9B', '本手册的演示模型。32 层混合结构：每 4 层中 3 层 Gated DeltaNet、1 层全注意力。'],
     ['Gated DeltaNet', 'Qwen3.5 的线性递推层；保留递推/卷积状态，不逐 token 保存全注意力 KV 历史。引擎为前缀复用额外保存检查点时仍会增加内存。'],
+    ['align / none', 'align：调度步结束在块边界时保存 GDN 检查点，和 APC 的满块对齐。none：不为复用保存这份状态。all 只在旧服务的日志里出现，按原文记录，不另记一套算法。'],
+    ['PD 分离', '把 prefill 和 decode 放到不同实例。prefill 侧对着 TTFT，decode 侧对着逐 token 延迟，代价是送走 KV。单张 T4 拆不开。'],
+    ['低延迟内核', '小 batch 时用 PDL 提前启动下一颗 kernel，把 all-reduce 叠进 GEMM 收尾，或把一层收成一两次常驻 kernel。需要高端 GPU 和专用插件，T4 实验不跑。'],
     ['Thinking mode', 'Qwen3.5 默认先生成思考再回答。关掉用 chat_template_kwargs.enable_thinking = false。']
   ];
   const gloss = $('#gloss-list');
