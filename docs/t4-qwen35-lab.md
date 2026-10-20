@@ -167,7 +167,7 @@ python3 examples/stream-bench.py --shared-prefix --requests 12 --concurrency 1 \
 
 **先查块大小。** vLLM 的 APC 只缓存写满的块。Qwen3.5 是混合模型，一页要同时放下若干 token 的全注意力 KV，和这一层 GDN 的状态检查点（config 指定递推状态为 FP32，约 2.05 MiB）。检查点不随 token 变小，所以块会被调大：按 v0.18.1 源码，不开前缀缓存时是 16 × ⌈2.05 MiB ÷ (16 × 4 KiB)⌉ = 528 token，开了前缀缓存还可能再调。以启动日志的 `Setting attention block size to N tokens` 为准，再让共享 system 段明显长于 N。命中长度会是 N 的整数倍，user 后缀基本不会命中。
 
-**状态模式决定 GDN 能不能跟着 KV 一起复用。** 要记住的是 `align`：只在某次调度步刚好结束在块边界时，保存这一步最后一个 token 的 GDN 状态。APC 也只命中写满的块，所以检查点和 KV 页落在同一条边界上。[v0.18.1 的 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)里，`none` 是关掉前缀缓存时的策略，不为复用保存这份状态。同一份配置还留着 `all`，注释写的是：开前缀缓存且模型支持时，在每个 `i * block_size` 都存状态。更新的服务去掉了 `all`，开前缀缓存时用 `align`。本实验仍跑 0.18.1，日志里三种词都可能出现，照实抄下来；判断复用是否成立，用命中长度是不是 N 的整数倍，而不是用 `all` 另记一套算法。
+**状态模式决定 GDN 能不能跟着 KV 一起复用。** 在 v0.18.1 上，关掉前缀缓存时是 `none`，不为复用保存这份状态。开着前缀缓存且模型支持时，默认常常是 `all`：在每个 `i * block_size` 都存状态。这是 [这一版 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)写明的默认，日志里出现 `all` 是预期，把原文抄进记录。v0.32 起去掉了 `all`。要带到更新引擎的模型是：开着 APC 用 `align`（只在调度步刚好结束在块边界时，保存这一步最后一个 token 的 GDN 状态），关掉用 `none`。APC 只命中写满的块，所以检查点和 KV 页落在同一条边界上。无论这次日志是 `all` 还是以后的 `align`，复用是否成立都看命中长度是不是 N 的整数倍。
 
 两组都做完后，对着 [v0.18.1 的 APC 说明](https://docs.vllm.ai/en/v0.18.1/features/automatic_prefix_caching/) 填实验记录：
 
@@ -256,7 +256,7 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 \
 - [该 revision 的量化配置](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/config.json)。
 - [vLLM v0.18.1 GPU 安装](https://docs.vllm.ai/en/v0.18.1/getting_started/installation/gpu/) 与 [注意力后端表](https://docs.vllm.ai/en/v0.18.1/design/attention_backends/)：版本化的硬件/后端依据。
 - [v0.18.1 CompressedTensors WNA16 源码](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py)：最低 capability 75 只是这条量化 scheme 的门槛，不是整模型验证。
-- [v0.18.1 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)：`none` / `all` / `align` 的定义。更新的服务去掉 `all`、开前缀缓存时用 `align`，见 [v0.32.0 说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)。实验以 0.18.1 的启动日志为准。
+- [v0.18.1 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)：`none` / `all` / `align` 的定义。开着前缀缓存且模型支持时，这一版默认常常是 `all`。[v0.32.0 说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)去掉 `all`，开 APC 用 `align`、关掉用 `none`。实验把 0.18.1 启动日志里的模式原文抄下。
 - [v0.18.1 APC 说明](https://docs.vllm.ai/en/v0.18.1/features/automatic_prefix_caching/) 与 [v0.18.1 APC 设计](https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html)、[v0.18.1 benchmark CLI](https://docs.vllm.ai/en/v0.18.1/cli/bench/serve/)。
 - [SGLang 对 InstantTensor 与 PD 的报告](https://github.com/sgl-project/sglang/releases/tag/v0.5.22)：第 10 节里的加载时间和长 prompt PD 数字。
 - [LMSYS：低延迟内核](https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode)：PDL、GEMM 收尾 all-reduce、monokernel，以及 GB300 / MI355X 上的 AgentX 数字。

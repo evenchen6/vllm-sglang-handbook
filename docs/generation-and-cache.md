@@ -56,7 +56,7 @@ Prefill 可以并行处理多个输入位置；因果 mask 只限制“看谁”
 
 另外 24 层 GDN 使用卷积与递推状态，并非每个 token 都保存完整 K/V 历史；**这不意味着它们没有缓存或不占显存**。单个活跃序列的滚动状态通常不随完整历史线性增长，但多序列、状态精度、引擎状态检查点与 prefix caching 会改变实际内存分配。
 
-按 config 与 vLLM v0.18.1 的状态形状：每层递推状态 `32 × 128 × 128`，卷积状态 `(16×128×2 + 32×128) × 3`。config 写了 `mamba_ssm_dtype: float32`，v0.18.1 会照此把递推状态存成 FP32，卷积状态跟随模型 dtype（FP16）：每层约 2.05 MiB，24 层约 49.1 MiB / 序列。全注意力每 token 32 KiB，所以单条序列在约 1570 token 以内时，GDN 状态比 8 层 KV 还大。`--mamba-ssm-cache-dtype float16` 可减半，vLLM 会警告，质量影响需自行验收。低精度 KV 是另一件事：它把全注意力公式里的「每元素字节」从 2 降到 1 或更低，换的是历史读取的带宽和能放下的上下文，同时要验收质量，并且这块 GPU 得有对应内核。T4 实验让 KV dtype 保持 `auto`、跟随 FP16，把这个变量留在账本里，不写进第一条启动命令。更新的服务会在更新的 GPU 上把 FP8 或 4-bit KV 做成某些模型的默认；要分开记的仍然是权重 dtype、KV dtype、GDN 递推 dtype。
+按 config 与 vLLM v0.18.1 的状态形状：每层递推状态 `32 × 128 × 128`，卷积状态 `(16×128×2 + 32×128) × 3`。config 写了 `mamba_ssm_dtype: float32`，v0.18.1 会照此把递推状态存成 FP32，卷积状态跟随模型 dtype（FP16）：每层约 2.05 MiB，24 层约 49.1 MiB / 序列。全注意力每 token 32 KiB，所以单条序列在约 1570 token 以内时，GDN 状态比 8 层 KV 还大。`--mamba-ssm-cache-dtype float16` 可减半，vLLM 会警告，质量影响需自行验收。低精度 KV 是另一件事：它把全注意力公式里的「每元素字节」从 2 降到 1 或更低，换的是历史读取的带宽和能放下的上下文，同时要验收质量，并且这块 GPU 得有对应内核。T4 实验让 KV dtype 保持 `auto`、跟随 FP16，把这个变量留在账本里，不写进第一条启动命令。在更新的服务里，FP8 KV 可以是某些模型在高端 GPU 上的默认，例如 [v0.32 说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)里 GLM-5.x 在 SM100 上默认 FP8 KV；NVFP4 和 4-bit KV 是可选项，不是这些模型的默认。要分开记的仍然是权重 dtype、KV dtype、GDN 递推 dtype。
 
 整卡预算至少包括：模型实际权重 + 全注意力 KV 池 + GDN 状态/检查点 + 临时激活/工作区 + CUDA Graph/框架等。nvidia-smi 占用、PyTorch allocated/reserved 与逻辑 KV 使用量是不同口径。
 
@@ -70,7 +70,7 @@ Prefill 可以并行处理多个输入位置；因果 mask 只限制“看谁”
 
 vLLM 的 KV 池只有一种页大小，混合模型的一页要同时放下若干 token 的 KV 和一层 GDN 状态检查点。检查点约 2.05 MiB，不随 token 缩小，所以块会被调大。按 v0.18.1 源码，不开前缀缓存时注意力块大小为 `16 × ⌈2.05 MiB ÷ (16 × 4 KiB)⌉ = 528` token（FP16 状态时约 272），而不是默认的 16。APC 只缓存写满的块，命中粒度因此也是块大小的倍数。以启动日志的 `Setting attention block size to N tokens` 为准。
 
-混合模型的前缀恢复必须同时拿回普通 KV 和递推状态。要记住的模式是 `align`：只在某次调度步刚好结束在第 i 个块的边界时，保存这一步最后一个 token 的 GDN 状态。这样检查点和 APC 的满块落在同一位置，命中长度是 N 的整数倍。`none` 不为复用保存检查点；v0.18.1 在关掉前缀缓存时用它。[v0.18.1 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)还定义了 `all`：开前缀缓存且模型支持时，在每个块边界存状态。更新的服务去掉了 `all`，开前缀缓存时用 `align`。本页的形状和 528 token 按 0.18.1 计算。日志若印出 `all`，照实记录，仍用整块命中来判断复用。前缀缓存通常减少 prefill，不能直接消除 decode 读取历史的成本。对照 [v0.18.1 APC 设计](https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html)。
+混合模型的前缀恢复必须同时拿回普通 KV 和递推状态。在 v0.18.1 上，关掉前缀缓存时是 `none`，不为复用保存检查点。开着前缀缓存且模型支持时，默认常常是 `all`：在每个块边界存状态。这是 [v0.18.1 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)写明的默认，实验把日志原文抄下来。v0.32 起去掉了 `all`。要带走的模型是：开着 APC 用 `align`（只在某次调度步刚好结束在第 i 个块的边界时，保存这一步最后一个 token 的 GDN 状态），关掉用 `none`。检查点和满块落在同一位置，命中长度是 N 的整数倍。本页的形状和 528 token 按 0.18.1 计算。前缀缓存通常减少 prefill，不能直接消除 decode 读取历史的成本。对照 [v0.18.1 APC 设计](https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html)。
 
 ## 从后台服务经验理解性能
 
@@ -96,6 +96,6 @@ Prefill 的多位置矩阵乘可复用权重，长 prompt 常偏计算受限；�
 - [vLLM 执行流程](https://vllm.ai/blog/2025-09-05-anatomy-of-vllm) 与 [v0.18.1 混合缓存管理](https://docs.vllm.ai/en/v0.18.1/design/hybrid_kv_cache_manager/)。
 - [LMSYS RadixAttention](https://lmsys.org/blog/2024-01-17-sglang/)。
 - [NVIDIA T4 规格](https://www.nvidia.com/en-us/data-center/tesla-t4/)、[Qwen3.5-9B config.json](https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json)、[W4A16 固定 revision 张量索引](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/model.safetensors.index.json)。
-- [v0.18.1 APC 设计](https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html)、[v0.18.1 混合模型块大小](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py)、[v0.18.1 GDN 状态形状](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/layers/mamba/mamba_utils.py)、[v0.18.1 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)。`all` 的删除见 [v0.32.0 说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)；本页计算仍按 0.18.1。
+- [v0.18.1 APC 设计](https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html)、[v0.18.1 混合模型块大小](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py)、[v0.18.1 GDN 状态形状](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/layers/mamba/mamba_utils.py)、[v0.18.1 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)。v0.18.1 开着前缀缓存且模型支持时默认常常是 `all`；[v0.32.0 说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)去掉 `all`，开 APC 用 `align`、关掉用 `none`。本页计算仍按 0.18.1。
 - [SGLang 对 InstantTensor 与 PD 的报告](https://github.com/sgl-project/sglang/releases/tag/v0.5.22)、[LMSYS 低延迟内核](https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode)。文中的 10 倍、27% 和 AgentX 数字来自这两页，不是 T4 实测。
 - [Transformers 连续批处理与服务能力](https://huggingface.co/docs/transformers/continuous_batching)：朴素 generate 封装不等于该库今天的全部能力。
