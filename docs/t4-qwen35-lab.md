@@ -36,6 +36,8 @@ W4A16 不意味着所有参数恰好 4bit。这份 checkpoint 的量化 `ignore`
 
 **三个检查分别完成：** 权重能放下；量化加载/矩阵乘内核支持 SM75；GDN 与普通注意力内核支持当前 dtype 和 GPU。普通注意力后端开关不会自动修复 GDN 的内核问题。若 FP16 下出现 NaN 或异常输出，也不能把它当成正常模型质量。
 
+**同日开源的 DeepInfer 不在这张卡上跑。** DeepSeek 2026-10-20 开源的推理框架 [DeepInfer](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md) 只支持 NVIDIA SM100 和华为昇腾 950（构建要 CUDA 13 或 CANN 9.2），T4 是 SM75；它服务的 DeepSeek-V4.1-Flash 在 NVIDIA 上的回归测试也要 4 张卡起步。本指南只在讲原理时引用它和配套的 deepseek-recipe，实验命令仍是 vLLM 0.18.1。
+
 ## 2. 先确认容器能用 GPU
 
 需要 Linux、Docker、NVIDIA 驱动与 NVIDIA Container Toolkit。宿主机先执行：
@@ -90,6 +92,8 @@ ssh -L 8000:127.0.0.1:8000 YOUR_T4_HOST
 
 在个人电脑运行客户端即可；记录是否经过隧道，它会影响客户端延迟。
 
+启动日志里还有一行要抄：`Asynchronous scheduling is enabled.`（或 `disabled.`）。0.18.1 默认打开异步调度：CPU 排下一步、处理上一步输出的同时，GPU 接着跑当前这一步。按这一版[源码](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/vllm.py)，单卡、不开推测解码的这套配置预期是 enabled。它为什么值得看，第 5 节再说。
+
 检查答案是否完整、是否重复或乱码、`finish_reason` 是否为 `length`。256 输出 token 是冒烟长度，可提高 `--max-tokens`，但它加上实际输入不能超过 4096。短窗口不是对模型能力的直接降级；需要更长上下文/推理时被截断才会影响结果完整性。
 
 ## 4. 认识脚本的测量口径
@@ -110,6 +114,8 @@ python3 examples/stream-bench.py --requests 12 --concurrency 1 \
 | `text_chunk_gap_ms` | 相邻非空 SSE 文本事件的到达间隔；**不是逐 token ITL**，一个事件可能含多个 token |
 | `output_tok_per_s` | 成功请求的服务端 completion token 总数 / 测量总时长；有成功请求缺 usage 时为 null，不拿 chunk 数冒充 token 数 |
 | `finish_length` | 输出达到上限的请求数；启用思考后尤其要检查 |
+
+文本事件和 token 对不上，还有反方向的原因：中文多是多字节 UTF-8，一个 token 可能拼不出完整的字，流式解码器通常会先攒着，等后面的 token 补齐再发。DeepSeek 开源的 deepseek-recipe 就这样处理，并且只把 token 形式的 `</think>` 当成思考结束（[源码](https://github.com/deepseek-ai/deepseek-recipe/blob/935817c66f5d6e64838f419692545f06787e485f/deepseek-recipe/src/stream/decoder.rs)）。所以脚本估 TPOT 用服务端 usage 的 token 数，不用事件数。
 
 失败请求不混入成功延迟，但失败数明确保留；不完整 SSE（没有 `[DONE]`）会报错。测试脚本不自动重试。p95 用最近秩法；12 条只够检查方向，不能发布为稳定 p95/p99。需要准确引擎 ITL、缓存命中与调度耗时，应结合对应版本的 `/metrics` 或官方 benchmark 工具。不要把各指标的 p99 直接相加推算 E2E p99。
 
@@ -142,6 +148,8 @@ python3 examples/stream-bench.py --requests 12 --concurrency 4 --label c4 --outp
 
 同时看 `ttft_text_ms` 和 `estimated_tpot_ms`。并发从 1 到 4 时，若总输出 token/s 上升、单条间隔几乎不变，符合「带宽受限时加并发，把读权重的成本摊薄」；若 TTFT 明显变差，多半是排队，或某一步里的 prefill 挡住了正在吐字的请求。这就是单卡上的 prefill / decode 冲突。把它拆到两台机器上，是后面学 PD 分离时要认出的同一件事。
 
+还有一段时间屋顶线没算：CPU 的调度和后处理。按顺序跑时，CPU 忙的那段 GPU 是空着的。异步调度把两边错开一步，代价是 CPU 看到的长度落后一步，要靠占位和 GPU 侧修正补上（见[原理补充](generation-and-cache.md)）。9B 在 T4 上一步至少约 25 ms，CPU 那点开销占比很小，所以预期这个开关对 token 间隔影响不大。这个预测可以用数据检验：第 7 节加一组 `ASYNC_SCHED=0`，其他条件不变。
+
 依赖启动、把 all-reduce 叠进 GEMM 收尾、把一层收成一两次常驻 kernel，都是小 batch 延迟内核。它们要高端 GPU 和专用插件，这一步不跑。T4 上用上面两项时间看清「延迟形态」和「吞吐形态」的差别即可。
 
 ## 6. 先在 vLLM 上做混合模型前缀对照
@@ -169,6 +177,8 @@ python3 examples/stream-bench.py --shared-prefix --requests 12 --concurrency 1 \
 
 **状态模式决定 GDN 能不能跟着 KV 一起复用。** 在 v0.18.1 上，关掉前缀缓存时是 `none`，不为复用保存这份状态。开着前缀缓存且模型支持时，默认常常是 `all`：在每个 `i * block_size` 都存状态。这是 [这一版 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)写明的默认，日志里出现 `all` 是预期，把原文抄进记录。v0.32 起去掉了 `all`。要带到更新引擎的模型是：开着 APC 用 `align`（只在调度步刚好结束在块边界时，保存这一步最后一个 token 的 GDN 状态），关掉用 `none`。APC 只命中写满的块，所以检查点和 KV 页落在同一条边界上。无论这次日志是 `all` 还是以后的 `align`，复用是否成立都看命中长度是不是 N 的整数倍。
 
+这条判断在别的混合结构里也成立：命中长度是所有状态能在同一条边界一起拿回来的最长整块前缀。DeepSeek-V4.1-Flash 的全局 KV 按 128 token 一块存；滑动窗口（SWA）的状态不在最后那块里，就退一块，把最后 128 个 token 重新前向，近似补回（SWA Bounded Replay）。SWA 能这样补，是因为它每层只看最近一个窗口；GDN 的状态累积整段历史，只能存检查点。细节见[原理补充](generation-and-cache.md)。
+
 两组都做完后，对着 [v0.18.1 的 APC 说明](https://docs.vllm.ai/en/v0.18.1/features/automatic_prefix_caching/) 填实验记录：
 
 - 启动日志里的块大小 N，以及 Mamba/GDN 模式原文。
@@ -179,7 +189,9 @@ APC/Radix 主要节省重复的 **prefill**；不会消除 decode 对历史上�
 
 ## 7. 每次只增加一个变量
 
-依次尝试：`MAX_LEN=8192`、`MAX_SEQS=2/4`、`EAGER=0` 开 CUDA Graph、调整 `BATCHED_TOKENS`、前缀缓存、思考模式。不要一次全开。更大上下文既受 KV 容量也受实际输入/输出需求影响，模型卡的 128K 思考建议不作为这张卡的首次验收条件。
+依次尝试：`MAX_LEN=8192`、`MAX_SEQS=2/4`、`EAGER=0` 开 CUDA Graph、调整 `BATCHED_TOKENS`、前缀缓存、思考模式、`ASYNC_SCHED=0` 关掉异步调度。不要一次全开。更大上下文既受 KV 容量也受实际输入/输出需求影响，模型卡的 128K 思考建议不作为这张卡的首次验收条件。
+
+调 `BATCHED_TOKENS` 时记住它是 token 预算，不是时间预算：同样 1024 个新 token，接在长前缀后面时注意力要和更长的历史算，这一块更贵。DeepSeek 的 prefill 调度给每一步定一个时间预算，用拟合的代价模型（新 token 数、已算前缀长度）反解这一块能切多大（[Q&A](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf)）。在 T4 上比较 token 预算时，把输入长度一起记下。`ASYNC_SCHED=0` 那组同理，只改这一项，c1 和 c4 都测，比 `estimated_tpot_ms`。
 
 若使用另一个引擎镜像，可设置 `VLLM_IMAGE`，但这是新环境，需要保存 digest、help 和全部结果。版本升级后不要将它与原来的数据混为一组。换镜像之后仍然记第 6 节那三项：块大小、状态模式、queries/hits，外加就绪时间和同一条 shared-prefix 的 TTFT。
 
@@ -222,6 +234,8 @@ docker run --rm --gpus device=0 --ipc=host \
 
 第二次追加 `--no-cache`，观察每次输入长度。代码只打印实际 cache 对象公开的张量；没有公开形状不等于没有状态。HF 普通注意力 `eager` 也不保证 GDN 不使用额外内核；这项同样未做真实 T4 验证。不要用这个逐步打印实验比较引擎吞吐。
 
+第三次追加 `--sync-debug`：脚本在生成循环里打开 PyTorch 的 `torch.cuda.set_sync_debug_mode("warn")`，遇到 CPU-GPU 同步就打印警告（同一行只报一次；这是实验性功能，不保证覆盖所有同步）。`argmax(...).item()` 和把 token 解码成文字，都要 CPU 停下来等 GPU 算完，朴素循环每一步都这样等。异步调度要消掉的正是这段等待；DeepInfer 在前向和采样的发射路径里把这个模式设成 `error`，出现同步就直接报错（[源码](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/deepinfer/utils.py)）。
+
 ## 10. 主线做完之后，怎样读 SGLang
 
 本仓库没有声称跑通的 SGLang + Qwen3.5-9B + W4A16 + T4 配方。官方安装环境、SM75 内核、Qwen3.5 加载与量化要一起核对；“某版本支持 T4”不等于这份 checkpoint 能加载。下面是对照你已经跑过的 vLLM 实验该看什么，不是另一套启动命令。
@@ -261,3 +275,5 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 \
 - [SGLang 对 InstantTensor 与 PD 的报告](https://github.com/sgl-project/sglang/releases/tag/v0.5.22)：第 10 节里的加载时间和长 prompt PD 数字。
 - [LMSYS：低延迟内核](https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode)：PDL、GEMM 收尾 all-reduce、monokernel，以及 GB300 / MI355X 上的 AgentX 数字。
 - [SGLang 安装指南](https://docs.sglang.io/docs/get-started/install)。安装指南不代表已有 T4 + Qwen3.5-9B W4A16 配方。
+- [vLLM v0.18.1 异步调度配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/vllm.py)：默认自动开启，遇到不兼容的推测解码方式或执行器才关，并打印 `Asynchronous scheduling is …`；`ASYNC_SCHED=0` 对应 `--no-async-scheduling`。
+- [DeepInfer README](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md) 与[推理部署 Q&A](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf)：硬件只支持 SM100 / 昇腾 950；第 6、7 节的 SWA 命中规则和 prefill 时间预算来自 Q&A，是 DeepSeek 生产栈的做法，不是 T4 结果。[deepseek-recipe 的流式解码器](https://github.com/deepseek-ai/deepseek-recipe/blob/935817c66f5d6e64838f419692545f06787e485f/deepseek-recipe/src/stream/decoder.rs)：第 4 节的 UTF-8 缓冲。

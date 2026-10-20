@@ -393,6 +393,7 @@
         <ul class="meta">
           <li>文档核对日期 2026-10-20</li>
           <li>2026-10-17 按 zero-to-sglang 第 4 章加深 KV，并加入屋顶线、采样、批处理、前缀缓存实验</li>
+          <li>2026-10-20 对照 DeepInfer 与 deepseek-recipe，把异步调度、变长验证、有界状态重放、Wide-EP 与协议层写进对应章节</li>
           <li>读者：推荐架构后台</li>
           <li>演示机：单张 NVIDIA T4，16GB</li>
           <li>主模型：Qwen3.5-9B（W4A16 权重 / FP16 激活 / 文本）</li>
@@ -638,8 +639,10 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <p class="explain" id="samp-note"></p>
       </div>
       <p class="explain">顺序：先把 logits 除以温度再 softmax；top-k 只留分数最高的 k 个；top-p 在剩下的候选里按概率从高到低累加，够 p 就停；最后重新归一化再抽。这里按 Hugging Face 的 warper 顺序演示，各引擎的实现细节以文档为准。Qwen3.5 模型卡给非思考模式的建议是 T = 0.7、top-p = 0.8、top-k = 20；本例只有 8 个候选，所以 top-k = 20 不起作用。温度只改变分布的尖锐程度，不改变排名。</p>
+      <p class="explain">固定 seed 只固定随机数。同一个请求单独跑和混在别的请求里跑，内核的分块和累加顺序可能不同，浮点结果就可能差一点。DeepSeek 的 <a href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md">DeepInfer</a>（生产引擎，T4 跑不了，见第 20 节）把「批不变」做成单独的开关（只在 NVIDIA 上）；确定性采样还要每条序列固定 seed，并关掉按整批分配的变长验证（第 15 节）。</p>
       <p><strong>为什么不缓存 Q？</strong>普通因果自注意力生成后续 token 时，用新的 Q 查询已有 K/V；过去的 Q 不参与这个新位置的计算。每层缓存自己的 K/V。GDN 则保留卷积与递推状态，不逐 token 保留完整 K/V 历史。</p>
       <p class="explain">不使用 KV cache 的朴素循环会重复计算历史位置的投影、注意力和 FFN；使用 cache 后，decode 仍需读取历史 KV 做注意力，不是「旧 token 完全不再计算」。形状、移位预测与可选的 Qwen3.5 前向观测见 <a href="docs/generation-and-cache.md">原理补充</a>。</p>
+      <p><strong>控制 token 只该由模板插入。</strong>chat template 插进去的 <code>&lt;|im_start|&gt;</code> 这类控制符是 special token。常见流程先把整段对话渲染成字符串、再整串 tokenize，用户正文里敲出的同样拼写也会被编成控制 token：用 Qwen3.5-9B 的 tokenizer 试，一轮消息本该有 3 个控制 token，正文里写两段拼写就变成 5 个（不用 GPU 的几行代码见<a href="docs/generation-and-cache.md">原理补充</a>）。DeepSeek 开源的 <a href="https://github.com/deepseek-ai/deepseek-recipe/blob/935817c66f5d6e64838f419692545f06787e485f/README.zh.md">deepseek-recipe</a> 在拼 prompt 时记下模板插入控制 token 的区间，只有这些区间按 special 编码，其余正文按普通文本编码；输出方向也只认 token 形式的 <code>&lt;/think&gt;</code>。控制 token 还把 prompt 切成互不影响的几段，可以并行 tokenize，长上下文的分词延迟随之下降。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf">DeepInfer Q&amp;A</a></p>
     </section>
 
     <section class="chapter" id="families">
@@ -656,6 +659,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <article class="card"><h3>Decoder-only</h3><p>GPT / Llama / Qwen。因果自注意力，自回归生成。vLLM / SGLang 的主战场。</p></article>
         <article class="card"><h3>Encoder–Decoder</h3><p>T5 / BART。编码器读输入，解码器带交叉注意力生成。服务形态更复杂一些。</p></article>
       </div>
+      <div class="callout"><strong>名字里带 encoder-decoder 的因果模型。</strong>DeepSeek-V4.1-Flash 的 Causal Encoder-Decoder（CED）不是 T5 那种编解码器，整个模型仍按因果自回归生成：40 层里前 20 层叫 encoder，后 20 层 decoder 的全局 KV 从 encoder 最后一层投影出来，所以 prefill 每 token 只激活 8B 参数，decode 激活 16B。不同在缓存怎么存、prefill 要算哪几层，见第 7、18 节。<a class="cite" href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash">模型卡</a></div>
     </section>
 
     <section class="chapter" id="kv" data-core="1">
@@ -734,8 +738,10 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <p class="explain">默认是 <a href="https://huggingface.co/Qwen/Qwen3.5-9B">Qwen3.5-9B</a> 模型卡上的全注意力：8 层、4 个 KV 头、头维 256。公式 <code>2 × L × n<sub>kv</sub> × d × tokens × B × bytes</code> 只算这些层的 K 和 V。容量基准默认 15 GiB，贴近 T4 上 nvidia-smi 常见的可见容量，请改成自己的读数。临时工作区、缓存池对齐和 CUDA Graph 都不在公式内，理论合计也不等于实测峰值。长度默认相同；真实请求要用各请求长度之和。</p>
         <p class="explain"><strong>另外 24 层 GDN 每条序列各有一份固定大小的状态。</strong>按 <a href="https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json">config.json</a>，每层递推状态是 32 个 V 头 × 128 × 128，卷积状态是 (16×128×2 + 32×128) × 3。config 里写了 <code>mamba_ssm_dtype: float32</code>，vLLM v0.18.1 会照此把递推状态存成 FP32，卷积状态跟随模型 dtype（这里 FP16）。合起来每层约 2.05 MiB，24 层约 49.1 MiB。它不随上下文变长，但每多一条并发序列就多一份。所以短对话时，GDN 状态比那 8 层 KV 还大。<code>--mamba-ssm-cache-dtype float16</code> 可以减半，vLLM 会打印警告，对输出质量的影响要自己验收。</p>
         <p class="explain"><strong>要复用前缀，这份滚动状态必须在块边界上留检查点。</strong>下一条请求要从第 i 个 token 接着算，就得有那一层当时的 GDN 状态，而不只是 8 层全注意力的 K、V。<code>align</code> 只在某次调度步刚好结束在块边界时，保存这一步最后一个 token 的状态。APC 也只缓存写满的块，所以两边是同一条边界，命中长度是块大小的整数倍。<code>none</code> 不为复用保存检查点；关掉前缀缓存时就是它。在 v0.18.1 上，前缀缓存开着且模型支持时，默认常常是 <code>all</code>：在每个块边界都存 GDN 状态。这是这一版的正常选择，不是日志打错；实验把模式原文抄下来。v0.32 起去掉了 <code>all</code>。要带走的模型是：开着 APC 用 <code>align</code>，关掉用 <code>none</code>。命中是不是整块，两种版本都用这一条判断。<a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py">v0.18.1 cache 配置</a></p>
+        <p class="explain"><strong>定长状态放哪，有两种做法。</strong>vLLM 0.18.1 只有一个页池，所以页被撑大到能装下一份 GDN 状态（第 13 节的 528 token）。DeepSeek 的 <a href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/deepinfer/worker/cache_engine.py">DeepInfer</a> 用两个分配器：会增长的压缩 KV 按 128 token 一块分页；滑动窗口（128）的 KV 和压缩累加器放进每条序列一个的定长槽，槽数启动时就切好，接纳请求时两边都要分得出来。环形缓冲是窗口 128 再加 6 格，留给投机解码回退，因为被拒的草稿已经写进了环。一个池子共用容量但页大；两个池子页小，代价是定长状态那份显存要预先切走。</p>
         <p class="explain">权重 9.35 GiB 是把<a href="https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/model.safetensors.index.json">固定 revision 的 W4A16 checkpoint</a> 里语言模型部分的张量逐个加起来得到的（不含视觉塔与 MTP）：FFN 与全注意力是 4bit，24 层 GDN 的线性层、Embedding、LM Head 仍是 16 位。T4 上 15 GiB × 0.85 的预算里，留给 KV、GDN 状态与激活的大约只有 3.4 GiB。</p>
         <p class="explain"><strong>低精度 KV 压的是公式里的「字节/元素」，不是权重。</strong>从 2 改成 1，同样的上下文少搬一半历史。Decode 吃带宽时，这换上下文长度和逐步延迟，同时要验收质量，还要有这块 GPU 上的内核。T4 实验把 <code>--kv-cache-dtype</code> 留在 <code>auto</code>，跟随 FP16，避免和 W4A16、GDN 搅在一起。在更新的服务里，FP8 KV 可以是某些模型在高端 GPU 上的默认，例如 v0.32 说明里 GLM-5.x 在 SM100 上默认 FP8 KV；NVFP4 和 4-bit KV 是可选项，不是这些模型的默认。日志里要分开看的三件套始终是：权重 dtype、KV dtype、GDN 递推 dtype。</p>
+        <p class="explain"><strong>存储精度不等于计算精度。</strong>DeepSeek-V4.1-Flash 在自家栈里把主压缩 KV 默认存成 FP4（每 16 通道一个 E4M3 scale）、滑窗 KV 存 MXFP8，全局 KV 约 890 字节/token；它的 FLOPs 估算器仍把注意力记成 BF16 运算。这套格式是模型、内核和 SM100 一起定的，T4 没有 FP8/FP4 张量核，抄不过来。你的 W4A16 是同一个道理：INT4 省的是搬运的字节，矩阵乘照样按 FP16 算。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/csrc/engine/flops_estimator.hpp">FLOPs 估算器</a> · <a class="cite" href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash">模型卡</a></p>
         <p class="explain">对一下原文例题：把 L、KV 头、头维、T、l、B 改成 36、8、128、100、0、1，字节选 BF16，GDN 层数改成 0（那是纯全注意力模型）。Prefill 与「再生成 l 个之后」都应约为 14.06 MiB，每步新增显示 144.0 KiB（约 0.14 MiB）。滑条从 256 起步，这一题改数字框；再拖滑条会把 T 吸到 256 的倍数。那一章用的是 Qwen3-4B-Thinking-2507，不是本页默认的 9B。</p>
       </div>
       <h3>一次请求的生命周期</h3>
@@ -837,6 +843,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
       <h3>两段时间，和两种机器形态</h3>
       <p>长 prefill 偏算力，小 batch decode 偏带宽。挤在同一次调度里时，一个长 prompt 会把正在吐字的请求的 token 间隔拉长。T4 上能看到的是：<code>max-num-seqs=1</code> 时后来的请求只能排队；调高之后，chunked prefill 让 prefill 和 decode 共享同一步。同时记下 TTFT 和逐步间隔，看变的是哪一项。</p>
       <p>把 prefill 和 decode 放到不同实例，是同一冲突的多机形态。prefill 池对着 TTFT，decode 池对着每人每秒 token，代价是把算好的 KV 送过去。收益出现在重算这段 prompt 比搬走 KV 更贵的长输入上。SGLang 在长 prompt 的 PD 负载上报告过吞吐最多增加 27%、p95 TTFT 降到约一半；那是他们的测量，单张 T4 拆不开。<a class="cite" href="https://github.com/sgl-project/sglang/releases/tag/v0.5.22">出处</a></p>
+      <p>生产里的 PD 还配着不同的并行尺度。DeepSeek 的 V4.1-Flash 用常见的 8 卡机做 prefill（专家并行 EP 2–8，显存够就尽量小），用 64–128 卡的超节点做 decode（Wide-EP，越宽越好），P、D 卡数约 1:1，KV 放独立存储。搬 KV 的成本跟 KV 大小直接相关：全局 KV 压到约 890 字节/token 后，P、D 分在相邻的两个机房也搬得动（大约每 8 张卡配 400 Gbps）。decode 的负载均衡同时看每张卡的请求数和 KV 总长，正好是上面屋顶线的 B 和上下文两个滑条；prefill 给每一步一个时间预算，用拟合的代价模型（新 token 数、已算前缀长度）反解 chunk 大小，而不是固定 token 数。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf">DeepInfer Q&amp;A</a></p>
       <p>更早还有一段等待：权重从磁盘进 GPU，到服务就绪为止。它不是请求的 TTFT。本实验会为了只改一个变量而反复重启，所以要把这段墙钟时间单独记下。SGLang 的 InstantTensor 加载器针对这一段；项目称大约快 10 倍，同页例子是 DeepSeek-R1、8×H200、50 GB/s 存储，从 160 s 到 15.3 s。不是 Qwen3.5-9B，也不是 T4。</p>
       <p>屋顶线没算 kernel 启动和卡间通信。一个用户、或推测解码一次只验证几行 token 时，每颗 kernel 的算术很少，时间花在等待上一颗写完，以及 all-reduce 上。高端 GPU 上的低延迟内核用依赖启动提前拉起下一颗 kernel，并把 all-reduce 叠进 GEMM 的收尾；也有把一整层收成一两次常驻 kernel 的做法。需要专用内核，T4 实验不跑。和第 14、15 节一起看。</p>
     </section>
@@ -981,6 +988,8 @@ docker run --rm --gpus device=0 --ipc=host \
       <p>第 8 节的屋顶线：并发从 1 往上加，读权重的成本被摊薄，总吞吐上升，单条请求的逐步时间几乎不变，直到 KV 读取或算力追上。吞吐内核按这个方向做大 tile、一次喂很多 token。延迟内核对着相反的角：一个用户，或推测解码一次只验证几行，kernel 太小，GPU 在两次启动之间空等。</p>
       <p>依赖启动（programmatic dependent launch，PDL）让下一颗 kernel 在输入还没就绪时就启动，先摆好屏障、装上权重，真正用到数据时再等。张量并行里，GEMM 算完一块就把部分和发给对端，通信叠在后面几块的计算上，而不是等整颗 GEMM 写回显存再另起一颗 all-reduce。AMD 上的 monokernel 更进一步：一层里几十个小 kernel 收成两次常驻启动，all-reduce 做在核内。<a class="cite" href="https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode">LMSYS 低延迟内核</a>把这两类做成插件（NVIDIA 的 sgl-nvidia-mega、AMD 的 sgl-amd-mono），服务的是 DeepSeek-V4.1-Flash 加 DSpark。文中 AgentX 回放、与同硬件基线相比：四张 GB300、1 路并发，P90 每用户生成速度从 671.2 tok/s 到 928.4 tok/s（1.38×）；四张 MI355X、4 路并发，从 331.6 tok/s 到 516.0 tok/s（1.56×）。需要这类 GPU 和专用内核，T4 实验不跑。</p>
       <p>T4 上对应的观察在并发实验里：同时记下 TTFT 和 token 间隔。并发升高后若 TTFT 变差、间隔几乎不变，你看到的是排队和 prefill 干扰。单卡上的这点干扰，就是多机上把 prefill、decode 拆开要消除的那件事。</p>
+      <h3>CPU 也会让 GPU 空等：异步调度</h3>
+      <p>每一步 decode 是「调度 → 前向 → 采样 → 后处理」。调度和后处理在 CPU 上，后处理前还要等采样结果拷回来，这段时间 GPU 空着。异步调度把它们错开一步：GPU 跑第 N 步时，CPU 已经排好并发出第 N+1 步，同时处理第 N−1 步的输出。代价是 CPU 看到的长度落后一步，引擎要先按乐观长度占位、再在 GPU 上修正，发射路径里不能有 CPU-GPU 同步。DeepSeek 的 DeepInfer 直接用 <code>torch.cuda.set_sync_debug_mode("error")</code> 守住这条路径，它的 Q&amp;A 说做法参考了 SGLang 和 Nanoflow。vLLM 0.18.1 默认开启，启动日志有 <code>Asynchronous scheduling is enabled.</code>。收益看一步多长：T4 上 9B 一步至少约 25 ms，CPU 占比小；一步只有几毫秒的高端部署才最需要它。实验第 7 步可以用 <code>ASYNC_SCHED=0</code> 关掉对照，第 9 步的 <code>--sync-debug</code> 能看到朴素循环每一步在哪里等 GPU。<a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/vllm.py">v0.18.1 源码</a> · <a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/deepinfer/worker/worker.py">DeepInfer worker</a></p>
     </section>
 
     <section class="chapter" id="more">
@@ -998,6 +1007,8 @@ docker run --rm --gpus device=0 --ipc=host \
         <article class="card"><h3>Speculative decoding</h3><p>草稿模型一次提议多个 token，目标模型在同一步里验证，接受则少做几次逐 token 的 decode。验证步往往只有几行，所以它和第 14 节的小 batch 延迟内核是同一类负载：算术少，启动和通信的空等占比高。T4 实验不启推测解码，也不装那些插件。</p></article>
       </div>
       <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制整份模型抬吞吐；<strong>EP</strong> 切 MoE expert。注意力数据并行是另一旋钮：多张卡上把不同请求的注意力分开算，份数不等于模型副本数。阅读服务参数时找这个份数（新文档写作 <code>--attn-dp-size</code>），不要把旧的布尔开关当成还要手写的步骤。单张 T4 用不到。</p>
+      <p><strong>推测解码验几个，看批大小。</strong>验证 k 个草稿就是这一步多算 k 行：带宽受限时几乎不加时间，多验划算；算力受限时每行都要付钱，只该验接受率高的。DeepSeek 的 DSpark 让草稿模块一次并行出 5 个 token，每个带一个预测接受率；调度器按「期望接受数 ÷ 步耗时」挑全批的验证集合，步耗时来自启动时实测的曲线。官方表格里，每 rank 16 并发时比固定验 5 个低 1.5%，96 并发时高 11%。社区常见配置是给一个 <code>num_speculative_tokens</code>。Qwen3.5 也带 MTP 草稿层，0.18.1 的方法表里有 <code>qwen3_5_mtp</code>，T4 主线不开。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/csrc/engine/mtp_varlen.hpp">mtp_varlen</a> · <a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/speculative.py">v0.18.1 推测解码配置</a></p>
+      <p><strong>MoE 多卡时每一步要全员同步。</strong>注意力 DP 配专家 EP 时，MoE 的 all-to-all 要全员到齐，所以每一步所有 rank 一起走：DeepInfer 的调度器先让整组投票决定这一步做 prefill 还是 decode，没活的 rank 陪跑空步，步长由最慢的卡决定。EPLB 给热门专家放冗余副本、按近期统计周期性重排来压这个差距（DeepSeek 报告最慢 rank ÷ 平均约 1.05–1.09）。decode 喜欢宽 EP（DeepSeek 用 64–128 卡），因为每卡要读的专家更少。你的 9B 是稠密模型，用不到。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/csrc/engine/scheduler.hpp">scheduler</a> · <a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/deepinfer/model_executor/eplb/policy.py">EPLB</a></p>
     </section>
 
     <section class="chapter" id="proc" data-core="1">
@@ -1049,6 +1060,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <tr><td><code>--max-num-batched-tokens 1024</code></td><td>每步 token 预算</td><td>配合 chunked prefill；调小时可能改善 decode 干扰，也会改变 TTFT</td></tr>
         <tr><td><code>--enforce-eager</code></td><td>先关闭 CUDA Graph</td><td>用于排障，不能把这组性能当成引擎上限</td></tr>
         <tr><td><code>--no-enable-prefix-caching</code></td><td>首次运行关闭前缀复用</td><td>对照时看日志里的块大小，并把 Mamba 模式原文抄下。v0.18.1 开着前缀缓存且模型支持时，默认常常是 <code>all</code>；关掉则是 <code>none</code>。v0.32 起开 APC 用 <code>align</code>，关掉用 <code>none</code></td></tr>
+        <tr><td>（不传）异步调度</td><td>0.18.1 默认自动开启；日志 <code>Asynchronous scheduling is enabled.</code></td><td><code>ASYNC_SCHED=0</code> 传 <code>--no-async-scheduling</code> 做对照；T4 一步较长，预期差别小，用数据确认</td></tr>
       </tbody></table>
       <pre><code># 并发调度实验：停掉旧容器后重新启动
 MAX_SEQS=4 bash scripts/serve-vllm-t4.sh
@@ -1095,6 +1107,7 @@ python3 examples/stream-bench.py --requests 12 --concurrency 4 \
       </table>
       <p>普通注意力的物理 KV 可按页存放；Radix 树通常在 CPU 上维护 token 前缀到缓存的索引。分页负责存储管理，Radix 负责查找与复用，也可共享物理页。缓存命中要求连续 token 前缀相同，并满足模型、位置与相关配置约束；不是任意相同句子都能复用。Qwen3.5 还需一致的 GDN 状态检查点，不能只复用那 8 层的 KV。</p>
       <div class="callout"><strong>把实验室里的「块 = 4」换成你的配置。</strong>vLLM 的 APC <a href="https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html">只缓存写满的块</a>，命中按整块计；SGLang 的 <code>--page-size</code> 默认是 1，按 token 命中，淘汰策略默认 LRU（<a href="https://docs.sglang.io/docs/advanced_features/server_arguments">服务参数文档</a>）。第 13 节算过，vLLM 跑 Qwen3.5-9B 时块会被调到几百个 token，因为这一页还要放下 GDN 检查点。v0.18.1 开着前缀缓存且模型支持时，默认常常是 <code>all</code>，把日志原文抄下；<code>none</code> 是关掉时的结果。v0.32 起去掉 <code>all</code>，开着 APC 用 <code>align</code>，关掉用 <code>none</code>。判断标准仍是命中长度是否为块大小的整数倍。第 19 节的前缀实验里，共享的 system 段要比一块长得多；先在启动日志里查到实际块大小，再决定 <code>--prefix-lines</code>。</div>
+      <p><strong>命中长度的通用规则：所有种类的状态都能在同一条边界拿回来的最长整块前缀。</strong>Qwen3.5 在 vLLM 上是 KV 页加 GDN 检查点。DeepSeek-V4.1-Flash 是 128 token 一块的全局 KV 加 128 窗口的滑动窗口注意力：最后那块里没有 SWA，就退一块，把最后 128 个 token 和没命中的后缀重新前向，近似补回 SWA（SWA Bounded Replay），所以 SWA 不必落盘。SWA 每层只看一个窗口，才能这样补；GDN 状态累积整段历史，只能存检查点。它的全局 KV 落在独立 SSD 集群，agent 流量保留 3 天、chatbot 7 天，任何 prefill 机器都能命中任何前缀，所以 prefill 的负载均衡不做前缀亲和。显存里的 APC / Radix 只在本实例有效，多副本时要么把相同前缀送到同一副本，要么接受命中率下降。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf">DeepInfer Q&amp;A</a> · <a class="cite" href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash">模型卡</a></p>
     </section>
 
     <section class="chapter" id="sglang-run" data-core="1">
@@ -1140,6 +1153,7 @@ python3 examples/stream-bench.py \
       <a href="https://www.baseten.co/inference-engineering/book/04-software/inference-engines/">Inference Engines</a></p>
       <p>和 T4 实验对齐时，先比四项：就绪时间、同一条 shared-prefix 的 TTFT、块大小与命中计数、并发升高后 TTFT 和 token 间隔谁在变。快加载器只动第一项。PD 分离动的是第四项里的 prefill 干扰，单张 T4 拆不开。本仓库没有这份 W4A16 在 T4 上的 SGLang 配方。</p>
       <div class="callout ok"><strong>实践：</strong>同一套录制流量（含真实 system 与多轮）在相同 GPU 上画「并发–TTFT p95–输出 tok/s」，再看运维成本。不要只看明星榜。</div>
+      <div class="callout"><strong>生产自研引擎长什么样：DeepInfer。</strong>DeepSeek 2026-10-20 开源的 <a href="https://github.com/deepseek-ai/DeepInfer">DeepInfer</a> 是支撑 V4.1-Flash 线上服务的引擎。README 写明它最初主要基于 vLLM，并受 SGLang、TensorRT-LLM 启发；二十多个文件头标着「Derived from vLLM」，<code>LLMEngine</code> / <code>Scheduler</code> / <code>Worker</code> / <code>ModelRunner</code> / <code>CacheEngine</code> 的骨架和早期 vLLM 一样，调度器搬进了 C++。读的时候别拿它当 vLLM V1 的进程模型。开源的是离线推理；完整服务还缺 KV 缓存系统、VE/Prefill/Decode 分离编排、跨数据并行副本的负载均衡。硬件只支持 NVIDIA SM100 和华为昇腾 950（CUDA 13 / CANN 9.2），T4（SM75）不能当它的实验床。本页在对应章节引用它：异步调度（第 14 节）、按置信度分配验证（第 15 节）、定长状态与命中规则（第 7、18 节）、协议层（第 5A、21 节）。它不是你要选的第三个引擎。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md">README</a> · <a class="cite" href="https://x.com/deepseek_ai/status/2112476496283775135">官方 X 帖</a> · <a class="cite" href="https://github.com/deepseek-ai/open-infra-index/tree/main/OpenSourcing_DeepSeek_Inference_Engine">早前立场</a></div>
     </section>
 
     <section class="chapter" id="gateway" data-core="1">
@@ -1153,6 +1167,7 @@ python3 examples/stream-bench.py \
       </header>
       <ul>
         <li>接口起步改 <code>base_url</code> / <code>api_key</code> / <code>model</code>；生产还需验证 chat template、思考/工具字段与 SSE 协议差异</li>
+        <li>协议 ↔ prompt ↔ token 是单独一层：Chat Completions / Responses / Messages 先转成同一种对话，再按模型版本渲染、编码，输出再解析回各协议的流式事件。DeepSeek 把这层开源成 <a href="https://github.com/deepseek-ai/deepseek-recipe">deepseek-recipe</a>，让第三方部署和官方 API 行为对齐；它不用 GPU，<code>pip install deepseek-recipe</code> 就能看渲染出的 prompt</li>
         <li>超时分层：连接超时、首 token 超时（TTFT SLO）、总超时</li>
         <li>重试只对可安全重试错误；注意流式中途失败</li>
         <li>SSE 给到端；反向代理注意缓冲与 idle timeout</li>
@@ -1175,9 +1190,9 @@ python3 examples/stream-bench.py \
     <section class="chapter" id="path" data-core="1">
       <header class="ch-h"><span class="num">22</span><div><p class="eyebrow">边体验边学习</p><h2>4–6 周：围绕 Qwen3.5 完成六个实验</h2></div></header>
       <div class="grid-2">
-        <article class="card"><h3>周 1 · 真实问答与基本链路</h3><p>先尝试 9B W4A16 非思考模式，观察中文输出。在第 5 节把注意力五步和 GQA 拖一遍，在第 5A 节比较贪心和 Qwen3.5 建议的采样参数。讲清 token/template、logits/采样与首 token；对照普通注意力和 Qwen3.5 的 GDN，不要求一开始推导 GDN。对照读 <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第4章_推理的核心数据结构入门.html">zero-to-sglang 第 4 章</a>，分清缓存的是 K、V。</p></article>
+        <article class="card"><h3>周 1 · 真实问答与基本链路</h3><p>先尝试 9B W4A16 非思考模式，观察中文输出。在第 5 节把注意力五步和 GQA 拖一遍，在第 5A 节比较贪心和 Qwen3.5 建议的采样参数。讲清 token/template、logits/采样与首 token；对照普通注意力和 Qwen3.5 的 GDN，不要求一开始推导 GDN。对照读 <a href="https://datawhalechina.github.io/zero-to-sglang/ch/part1/第4章_推理的核心数据结构入门.html">zero-to-sglang 第 4 章</a>，分清缓存的是 K、V。不用 GPU 也能先看 tokenizer：用<a href="docs/generation-and-cache.md">原理补充</a>里的几行代码，看用户正文里的控制符怎样变成真控制 token。</p></article>
         <article class="card"><h3>周 2 · 前向与显存</h3><p>可选用同代 4B 跑 5 步前向观测，比较有无 cache 的输入长度。用第 7 节写出 Prefill 结束、Decode 每步、再生成 l 个之后，并填入权重 9.35 GiB 和 GDN 状态，容量基准改成 nvidia-smi 的读数。用第 8 节的屋顶线算出单条 decode 的理论上限，再和实测比，差距就是 kernel 效率与框架开销。区分模型加载 OOM 和运行 OOM。</p></article>
-        <article class="card"><h3>周 3 · 流式与调度</h3><p>先在第 14 节对比静态批和连续批，并读完小 batch 延迟与 prefill/decode 冲突。再用同一 9B checkpoint，客户端并发 1/2/4；同步记录引擎 max-num-seqs。用屋顶线预测：带宽受限时总吞吐应近似随并发增长。同时看 TTFT 和 token 间隔谁在变。低延迟插件不在 T4 上跑。先排除编译与冷启动，保存 TTFT、首答案时间、E2E、输出 token/s、长度和失败数。</p></article>
+        <article class="card"><h3>周 3 · 流式与调度</h3><p>先在第 14 节对比静态批和连续批，并读完小 batch 延迟与 prefill/decode 冲突。再用同一 9B checkpoint，客户端并发 1/2/4；同步记录引擎 max-num-seqs。用屋顶线预测：带宽受限时总吞吐应近似随并发增长。同时看 TTFT 和 token 间隔谁在变。低延迟插件不在 T4 上跑。先排除编译与冷启动，保存 TTFT、首答案时间、E2E、输出 token/s、长度和失败数。启动日志里抄下 <code>Asynchronous scheduling</code> 的原文；想验证 CPU 重叠在 T4 上收益小，用 <code>ASYNC_SCHED=0</code> 对照 token 间隔。</p></article>
         <article class="card"><h3>周 4 · 前缀开关对照</h3><p>先在启动日志里找到块大小 N，并把 Mamba 模式原文抄下。v0.18.1 开着前缀缓存且模型支持时，默认常常是 <code>all</code>；<code>none</code> 表示没有 GDN 检查点。共享前缀要比 N 长，命中长度是 N 的整数倍。v0.32 起开 APC 用 <code>align</code>、关掉用 <code>none</code>，判断标准相同。顺序预热后对比 PREFIX_CACHE=0/1，并抄下 <code>/metrics</code> 的 queries 与 hits。</p></article>
         <article class="card"><h3>周 5 · 每次只调一项</h3><p>先比较上下文 4096/8192，再比较 CUDA Graph 开关、token 预算。若接着看 SGLang，按第 19 节把 vLLM 的就绪时间、块大小、状态模式、命中计数和 shared-prefix TTFT 抄下来，再逐项核对 W4A16、FP16、GDN 与 SM75。对不上就停，不另写一份配方。</p></article>
         <article class="card"><h3>周 6 · 思考与服务接入</h3><p>单独开启思考，观察 reasoning 首包和最终答案时间；检查 length 截断。写网关首包/总超时、流式取消与 OOM 处理，不把短窗口直接等同于能力下降。</p></article>
@@ -1257,6 +1272,7 @@ python3 examples/stream-bench.py \
         <li>硬件与模型数字：<a href="https://www.nvidia.com/en-us/data-center/tesla-t4/">NVIDIA T4 规格</a>（FP16 65 TFLOPS、320+ GB/s、16 GB） · <a href="https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json">Qwen3.5-9B config.json</a> · <a href="https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/model.safetensors.index.json">W4A16 固定 revision 的张量索引</a>（权重 10.04 GB 由各分片 safetensors 头逐个求和，不含视觉塔与 MTP）</li>
         <li>vLLM 内部：<a href="https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html">v0.18.1 APC 设计（只缓存满块、LRU）</a> · <a href="https://docs.vllm.ai/en/v0.18.1/design/hybrid_kv_cache_manager/">v0.18.1 混合 KV 缓存管理</a> · <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py">v0.18.1 混合模型块大小</a> · <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/layers/mamba/mamba_utils.py">v0.18.1 GDN 状态形状与 dtype</a> · <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py">v0.18.1 的 none / all / align</a>。v0.18.1 开着前缀缓存且模型支持时默认常常是 <code>all</code>。v0.32 起去掉 <code>all</code>，开 APC 用 <code>align</code>、关掉用 <code>none</code>，见 <a href="https://github.com/vllm-project/vllm/releases/tag/v0.32.0">v0.32.0 说明</a>；实验把 0.18.1 日志里的模式原文抄下</li>
         <li>加载、PD 与低延迟内核：<a href="https://github.com/sgl-project/sglang/releases/tag/v0.5.22">SGLang 对 InstantTensor 与 PD 的报告</a> · <a href="https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode">LMSYS 低延迟模式</a>。文中的 10 倍、27% 和 AgentX 数字来自这两页，不是 T4 实测</li>
+        <li>DeepSeek 生产栈对照（2026-10-20 开源，<a href="https://x.com/deepseek_ai/status/2112476496283775135">官方 X 帖</a>）：<a href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md">DeepInfer README</a>（硬件、开源范围与缺口） · <a href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf">推理部署 Q&amp;A</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash">V4.1-Flash 模型卡</a>与 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/config.json">config</a> · <a href="https://github.com/deepseek-ai/deepseek-recipe/blob/935817c66f5d6e64838f419692545f06787e485f/README.zh.md">deepseek-recipe</a> · <a href="https://github.com/deepseek-ai/open-infra-index/tree/main/OpenSourcing_DeepSeek_Inference_Engine">open-infra-index 早前立场</a>；vLLM v0.18.1 <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/vllm.py">异步调度默认</a>与 <a href="https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/v1/core/sched/async_scheduler.py">AsyncScheduler</a>。Q&amp;A 与模型卡里的数字是官方自述，不是 T4 实测</li>
         <li>SGLang：<a href="https://docs.sglang.io/docs/advanced_features/server_arguments">服务参数</a>（<code>--page-size</code> 默认 1，<code>--radix-eviction-policy</code> 默认 lru）</li>
         <li>Transformer 论文：<a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a></li>
         <li>HF Transformers：<a href="https://huggingface.co/docs/transformers">文档</a> · <a href="https://github.com/huggingface/transformers">GitHub</a></li>
@@ -2371,7 +2387,11 @@ python3 examples/stream-bench.py \
     { q: '混合模型要让 GDN 状态和 KV 一起复用，检查点落在哪？', opts: ['任意一个 token', '写满的块边界（align）', '只复用 Q', '和块大小无关'], a: 1, why: '要带走的是 align：调度步结束于块边界时保存递推状态。v0.18.1 开着 APC 且模型支持时，默认常常是 all，实验照原文记录；v0.32 起去掉 all，开 APC 用 align，关掉用 none。' },
     { q: 'Qwen3.5-9B 一层全注意力有 16 个 Q 头、4 个 KV 头。KV cache 和每头各存一份相比？', opts: ['一样大', '1/4', '4 倍', '1/16'], a: 1, why: 'GQA 让每 4 个 Q 头共用一组 K、V，缓存只存 4 组：每层每 token 4 KiB，而不是 16 KiB。' },
     { q: 'GDN 层每条序列的状态随上下文长度？', opts: ['线性增长', '不变，24 层合计约 49 MiB', '平方增长', '为 0'], a: 1, why: '递推状态是固定的 32 × 128 × 128（config 指定 FP32），加上很小的卷积状态；不随长度涨，但每多一条并发序列就多一份。' },
-    { q: '单张 16GB T4 上跑 Qwen3.5-9B，起步用？', opts: ['照抄官方 BF16 与 262144 上下文', 'W4A16 文本权重，上下文从短窗口试', '打开 FP8 W8A8，因为 T4 支持', '两张卡做张量并行'], a: 1, why: 'T4 上主线尝试 W4A16 权重、FP16 激活与短上下文；权重容量、量化内核和 GDN 兼容性需分别验证。配置未实测，不保证启动成功。' }
+    { q: '单张 16GB T4 上跑 Qwen3.5-9B，起步用？', opts: ['照抄官方 BF16 与 262144 上下文', 'W4A16 文本权重，上下文从短窗口试', '打开 FP8 W8A8，因为 T4 支持', '两张卡做张量并行'], a: 1, why: 'T4 上主线尝试 W4A16 权重、FP16 激活与短上下文；权重容量、量化内核和 GDN 兼容性需分别验证。配置未实测，不保证启动成功。' },
+    { q: '异步调度主要消掉的是哪段时间？', opts: ['KV 页的尾部碎片', 'CPU 调度和后处理期间 GPU 的空等', '权重从磁盘加载', '网络回传'], a: 1, why: 'decode 一步是调度、前向、采样、后处理，CPU 那两段原本让 GPU 闲着。异步调度把它们和 GPU 前向错开一步，代价是 CPU 看到的长度落后一步。vLLM 0.18.1 默认开启。' },
+    { q: '推测解码每步多验几个草稿，什么时候几乎不加时间？', opts: ['任何时候都不加', '带宽受限的小批 decode', '算力受限的大批 decode', '只有 prefill 时'], a: 1, why: '小批 decode 一步主要在读权重，多算几行几乎白送；算力受限时每行都要付钱。DSpark 按置信度挑验证集合：每 rank 16 并发时比固定验 5 个低 1.5%，96 并发时高 11%。' },
+    { q: 'DeepSeek-V4.1-Flash 的 SWA 缺了只重放 128 个 token 就能近似补回，Qwen3.5 的 GDN 状态为什么不行？', opts: ['GDN 状态太大', 'GDN 递推状态累积整段历史，没有固定窗口可重放', 'vLLM 不支持重算', 'GDN 没有状态'], a: 1, why: 'SWA 每层只看最近 128 个 token；GDN 把全部历史压进一个状态。所以前者可以不落盘、缺了重放一小段，后者只能在块边界存检查点。' },
+    { q: '用户消息里写了 &lt;|im_start|&gt; 这几个字，安全的 prompt 编码应该把它编成？', opts: ['一个控制 token', '若干普通 token', '直接丢弃', 'EOS'], a: 1, why: '控制 token 只该由模板插入。deepseek-recipe 记下模板插入的区间，只有区间内按 special 编码，正文里的同样拼写按普通文本编码。' }
   ];
   const quizBox = $('#quiz-box');
   $('#quiz-total').textContent = questions.length;
@@ -2448,7 +2468,14 @@ python3 examples/stream-bench.py \
     ['align / none / all', 'v0.18.1 开着前缀缓存且模型支持时，默认常常是 all，实验照原文记录。v0.32 起去掉 all：开 APC 用 align（调度步结束在块边界时存 GDN 检查点），关掉用 none。'],
     ['PD 分离', '把 prefill 和 decode 放到不同实例。prefill 侧对着 TTFT，decode 侧对着逐 token 延迟，代价是送走 KV。单张 T4 拆不开。'],
     ['低延迟内核', '小 batch 时用 PDL 提前启动下一颗 kernel，把 all-reduce 叠进 GEMM 收尾，或把一层收成一两次常驻 kernel。需要高端 GPU 和专用插件，T4 实验不跑。'],
-    ['Thinking mode', 'Qwen3.5 默认先生成思考再回答。关掉用 chat_template_kwargs.enable_thinking = false。']
+    ['Thinking mode', 'Qwen3.5 默认先生成思考再回答。关掉用 chat_template_kwargs.enable_thinking = false。'],
+    ['异步调度 / 零开销调度', 'CPU 排下一步、处理上一步输出的同时 GPU 不停，两边错开一步。CPU 看到的长度落后一步，靠占位和 GPU 侧修正补上。vLLM 0.18.1 默认开启，DeepInfer 叫零开销批调度。'],
+    ['变长验证（DSpark）', '草稿头给每个草稿一个预测接受率，调度器按「期望接受数 ÷ 步耗时」挑全批的验证集合：低并发多验，高并发少验。'],
+    ['EPLB', '专家并行负载均衡：给热门专家放冗余副本，按近期统计周期性重排，压低最慢 rank 和平均的差距。'],
+    ['Wide-EP', 'decode 用很宽的专家并行（DeepSeek 用 64–128 卡），每卡要读的专家更少，同一专家每步攒到更多 token。'],
+    ['SWA Bounded Replay', 'DeepSeek-V4.1-Flash 的滑动窗口 KV 缺失时，只重放最近 128 个 token 近似补回，因此不必落盘。依赖模型结构，不是通用开关。'],
+    ['Special token 注入', '用户正文里写出控制符的拼写，被整串 tokenize 成真控制 token。防法是只把模板插入的区间按 special 编码（deepseek-recipe 的做法）。'],
+    ['批不变（batch invariance）', '同一请求单跑和混批跑得到逐位相同的数值，需要专门的内核。固定 seed 只管随机数。']
   ];
   const gloss = $('#gloss-list');
   function renderGloss(filter='') {

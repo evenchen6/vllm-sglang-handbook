@@ -44,6 +44,12 @@ case "${EAGER:-1}" in
   0) ;;
   *) printf 'EAGER must be 0 or 1\n' >&2; exit 2 ;;
 esac
+case "${ASYNC_SCHED:-auto}" in
+  auto) ;;
+  0) engine_args+=(--no-async-scheduling) ;;
+  1) engine_args+=(--async-scheduling) ;;
+  *) printf 'ASYNC_SCHED must be auto, 0 or 1\n' >&2; exit 2 ;;
+esac
 
 command=(docker run --rm --gpus "device=${GPU_DEVICE:-0}" --ipc=host
   --name "${CONTAINER_NAME:-qwen35-t4}"
