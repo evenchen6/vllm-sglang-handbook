@@ -24,6 +24,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=5)
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--sync-debug", action="store_true",
+                        help="warn on CPU-GPU synchronizations inside the generation loop")
     args = parser.parse_args()
     if args.steps < 1:
         parser.error("steps must be positive")
@@ -47,6 +49,9 @@ def main():
         return_tensors="pt", return_dict=True).to("cuda")
     all_ids, mask = inputs["input_ids"], inputs["attention_mask"]
     cache = None
+    if args.sync_debug:
+        # Experimental in PyTorch: not every synchronizing op is reported; each source line warns once.
+        torch.cuda.set_sync_debug_mode("warn")
     with torch.inference_mode():
         for step in range(args.steps):
             step_ids = all_ids if args.no_cache or step == 0 else all_ids[:, -1:]
