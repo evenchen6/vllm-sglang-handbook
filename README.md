@@ -4,7 +4,7 @@
 
 - [图解手册](https://evenchen6.github.io/vllm-sglang-handbook/)：模型结构、生成时序、KV、分页、调度与选型。
 - [T4 + Qwen3.5 实验指南](docs/t4-qwen35-lab.md)：环境检查、启动、流式体验、并发与前缀缓存对照。
-- [原理补充](docs/generation-and-cache.md)：张量形状、首 token、混合缓存与性能瓶颈。
+- [原理补充](docs/generation-and-cache.md)：张量形状、首 token、控制 token、混合缓存、调度与性能瓶颈，并对照 DeepSeek 开源的 DeepInfer / deepseek-recipe 的做法（DeepInfer 只支持 SM100 / 昇腾 950，不在 T4 上跑）。
 - [实验记录模板](docs/experiment-template.md)：记录实际环境与结果。
 
 ## 在 T4 上开始
@@ -34,7 +34,7 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output
 | `index.html` | 无构建步骤的交互手册 |
 | `scripts/serve-vllm-t4.sh` | 固定版本的 T4 启动命令与可调参数 |
 | `examples/stream-bench.py` | 流式问答、客户端延迟和并发闭环实验 |
-| `examples/trace-generation.py` | 可选：Qwen3.5-4B 的逐次前向与混合缓存观测 |
+| `examples/trace-generation.py` | 可选：Qwen3.5-4B 的逐次前向、混合缓存与 CPU-GPU 同步观测 |
 | `docs/` | 实验步骤、原理说明、结果模板 |
 
 Qwen3.5 的混合结构贯穿主线。先用普通因果注意力解释通用原理，再标出 Gated DeltaNet 的状态差异；不要求先学习旧模型。
