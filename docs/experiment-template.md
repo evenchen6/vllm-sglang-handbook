@@ -17,7 +17,7 @@
 | 显存预算 / CUDA Graph / prefix cache / 状态模式 | |
 | 容器启动到 `/v1/models` 的墙钟时间 | |
 | 注意力块大小 N（启动日志原文） | |
-| Mamba/GDN 模式原文（`none` / `align` / `all`） | |
+| Mamba/GDN 模式原文（`none` / `align` / `all`；Qwen3.5 @ v0.18.1 开前缀缓存应为 `align`） | |
 | 异步调度日志原文（`Asynchronous scheduling is …`）、`ASYNC_SCHED` 取值 | |
 | 激活 dtype、KV dtype、注意力后端 | |
 | thinking、采样、输入长度与输出上限 | |
