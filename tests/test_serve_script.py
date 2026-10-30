@@ -97,15 +97,19 @@ class ServeScriptTests(unittest.TestCase):
 
     def test_listen_address_port_gpu_and_cache_mapping(self):
         cases = [
-            {"name": "defaults", "env": {}, "port": "8000", "gpu": "0", "cache": CACHE},
+            {"name": "defaults", "env": {}, "port": "8000", "gpu": "0", "cache": CACHE, "docker_cache": CACHE},
             {"name": "port and gpu", "env": {"PORT": "8100", "GPU_DEVICE": "1"}, "port": "8100", "gpu": "1",
-             "cache": CACHE},
+             "cache": CACHE, "docker_cache": CACHE},
             {"name": "existing CUDA_VISIBLE_DEVICES", "env": {"CUDA_VISIBLE_DEVICES": "2"}, "port": "8000",
-             "gpu": "2", "cache": CACHE},
+             "gpu": "2", "cache": CACHE, "docker_cache": CACHE},
             {"name": "GPU_DEVICE wins", "env": {"CUDA_VISIBLE_DEVICES": "2", "GPU_DEVICE": "3"}, "port": "8000",
-             "gpu": "3", "cache": CACHE},
+             "gpu": "3", "cache": CACHE, "docker_cache": CACHE},
             {"name": "relative cache", "env": {"HF_CACHE_DIR": "rel/hf"}, "port": "8000", "gpu": "0",
-             "cache": f"{ROOT}/rel/hf"},
+             "cache": f"{ROOT}/rel/hf", "docker_cache": f"{ROOT}/rel/hf"},
+            {"name": "existing HF_HOME, native only", "env": {"HF_HOME": "/data/hf"}, "port": "8000", "gpu": "0",
+             "cache": "/data/hf", "docker_cache": CACHE},
+            {"name": "HF_CACHE_DIR wins", "env": {"HF_HOME": "/data/hf", "HF_CACHE_DIR": "/data/lab"},
+             "port": "8000", "gpu": "0", "cache": "/data/lab", "docker_cache": "/data/lab"},
         ]
         for case in cases:
             with self.subTest(case["name"]):
@@ -116,7 +120,7 @@ class ServeScriptTests(unittest.TestCase):
                 self.assertEqual(args[args.index("--port") + 1], case["port"])
                 docker = dry_run(**case["env"])
                 self.assertIn(f"127.0.0.1:{case['port']}:8000", docker)
-                self.assertIn(f"{case['cache']}:/root/.cache/huggingface", docker)
+                self.assertIn(f"{case['docker_cache']}:/root/.cache/huggingface", docker)
                 args = engine_args(docker)
                 self.assertEqual(args[args.index("--port") + 1], "8000")
 

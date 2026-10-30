@@ -22,15 +22,18 @@ esac
 runtime="${RUNTIME:-docker}"
 case "$runtime" in
   # Inside the container vLLM listens on every interface; Docker publishes it on host loopback only.
-  docker) listen_host=0.0.0.0 listen_port=8000 ;;
-  native) listen_host=127.0.0.1 listen_port="${PORT:-8000}" ;;
+  docker) listen_host=0.0.0.0 listen_port=8000 default_cache="$PWD/.cache/huggingface" ;;
+  native)
+    listen_host=127.0.0.1 listen_port="${PORT:-8000}"
+    default_cache="${HF_HOME:-$PWD/.cache/huggingface}"
+    ;;
   *) printf 'RUNTIME must be docker or native\n' >&2; exit 2 ;;
 esac
 
 vllm_version='0.18.1'
 image="${VLLM_IMAGE:-vllm/vllm-openai:v$vllm_version}"
 revision="${MODEL_REVISION:-$revision}"
-cache_dir="${HF_CACHE_DIR:-$PWD/.cache/huggingface}"
+cache_dir="${HF_CACHE_DIR:-$default_cache}"
 [[ "$cache_dir" = /* ]] || cache_dir="$PWD/$cache_dir"
 
 engine_args=(
