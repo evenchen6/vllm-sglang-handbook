@@ -8,14 +8,14 @@
 | --- | --- |
 | 日期、机器 / GPU | |
 | nvidia-smi 容量、驱动、空闲显存 | |
-| 镜像标签与实际 digest | |
+| 运行方式（Docker / 原生）；镜像标签与实际 digest，或原生的 Python 路径与 `pip freeze` | |
 | 引擎、Python、PyTorch、CUDA、Transformers 版本 | |
 | checkpoint 与 revision | |
 | 量化、激活/KV/递推状态 dtype | |
 | 普通注意力 / GDN 实际内核 | |
 | max-model-len / max-num-seqs / batched tokens | |
 | 显存预算 / CUDA Graph / prefix cache / 状态模式 | |
-| 容器启动到 `/v1/models` 的墙钟时间 | |
+| 服务启动（容器或原生进程）到 `/v1/models` 的墙钟时间 | |
 | 注意力块大小 N（启动日志原文） | |
 | Mamba/GDN 模式原文（`none` / `align` / `all`；Qwen3.5 @ v0.18.1 开前缀缓存应为 `align`） | |
 | 异步调度日志原文（`Asynchronous scheduling is …`）、`ASYNC_SCHED` 取值 | |
