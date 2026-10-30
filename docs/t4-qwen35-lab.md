@@ -28,7 +28,7 @@
 | GPU | 单张 T4，SM75 | 单张 H20，SM90 | 按用户现有设备 |
 | 引擎 | vLLM 0.32.0，镜像 `vllm/vllm-openai:v0.32.0` | 同左 | 两台机器同一版本，记录才能放在一起看 |
 | 对照引擎 | 不跑（没有核对过的 SM75 配方） | SGLang 0.5.23，镜像 `lmsysorg/sglang:v0.5.23` | 第 10 节 |
-| 服务模型 | `RedHatAI/Qwen3.5-9B-quantized.w4a16` | `Qwen/Qwen3.8-27B-FP8`；对照 `Qwen/Qwen3.8-27B` | Qwen3.8 只有 27B 这一档稠密模型，最小的 W4A16 版也有 19.5 GB，T4 放不下；两者同一个 vLLM 类 |
+| 服务模型 | `RedHatAI/Qwen3.5-9B-quantized.w4a16` | `Qwen/Qwen3.8-27B-FP8`；对照 `Qwen/Qwen3.8-27B` | Qwen3.8 官方最小的就是 27B（另两档是约 180B 的 Flash-Next 和 2.4T MoE），它最小的 W4A16 版也有 19.5 GB，T4 放不下；9B 与 27B 是同一个 vLLM 类 |
 | 模型 revision | `a398088c4228b0ae0c8c78df88fd1e4bf445f068` | FP8 `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`，BF16 `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | 固定本次检查到的权重与配置 |
 | 权重量化 | W4A16（INT4，group 128） | FP8 块量化（128×128，激活动态量化） | T4 没有 FP8 张量核；SM90 有 |
 | 激活 / 未量化权重 | FP16（`--dtype half`） | BF16（`--dtype bfloat16`） | T4 没有 BF16 张量核 |
@@ -298,7 +298,7 @@ FP8 KV 让每 token 的 KV 减半，GDN 状态不变，N 就翻倍，命中粒�
 
 **`align` 把 GDN 状态存在哪。** 按 0.32 的[调度器](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/core/sched/scheduler.py)和 [cache 配置](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/config/cache.py)：状态在调度步结束时写，所以 prefill 的分块要停在块边界上；每条 prompt 会在最后一个整块边界 ⌊(L−1)/N⌋·N 处停一下，保留那里的状态（至少留 1 个 token 重算）。如果后来的请求在全注意力 KV 上命中得比 GDN 状态更长，调度器还会在这个「共享前缀交汇点」停一步补存状态（Marconi 式），下一条请求就能整段命中。默认只保留这些点上的检查点（`prefix_cache_retention_interval=0`）。命中要全部状态在同一条边界上都拿得回来，所以命中长度是 N 的整数倍。
 
-**据此对默认 32 行的预期**（源码推断，不是实测）：第一条（预热）不命中；之后各条的最后整块边界在 T4 上是 528、在 H20 上是 784，都落在 966 的公共前缀里，所以从第二条起 `cached_tokens` 应当是 528 / 784。`KV_DTYPE=fp8` 时 N = 1568 比整个输入还长，32 行一个块都凑不满，改用 `--prefix-lines 64`，预期命中 1568。如果交汇点落在后缀里，命中会推迟到第三条。PREFIX_CACHE=0 那组应全为 0。
+**据此对默认 32 行的预期**（源码推断，不是实测）：预热那条不命中，它在最后整块边界留下状态，T4 上是 528、H20 上是 784，都落在 966 的公共前缀里。预热不进 `results`，所以结果里 12 条的 `cached_tokens` 都应当是 528（H20 是 784）。`KV_DTYPE=fp8` 时 N = 1568 比整个输入还长，32 行一个块都凑不满，改用 `--prefix-lines 64`，预期命中 1568。若你改了提示词，让最后整块边界落到各请求不同的后缀里，就要等交汇点补存之后才命中，结果里第一条会是 0。PREFIX_CACHE=0 那组应全为 0。
 
 两组都做完后，对着 [0.32 的 APC 说明](https://docs.vllm.ai/en/v0.32.0/features/automatic_prefix_caching/)填实验记录：
 
