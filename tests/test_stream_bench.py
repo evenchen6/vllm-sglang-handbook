@@ -35,7 +35,10 @@ class Handler(BaseHTTPRequestHandler):
             {"choices": [{"delta": {"content": "。"}, "finish_reason": "stop"}]},
         ]
         if payload["model"] != "no-usage":
-            events.append({"choices": [], "usage": {"completion_tokens": 9, "prompt_tokens": 40}})
+            usage = {"completion_tokens": 9, "prompt_tokens": 40}
+            if payload["model"] == "cached":
+                usage["prompt_tokens_details"] = {"cached_tokens": 32}
+            events.append({"choices": [], "usage": usage})
         for event in events:
             data = ("data: " + json.dumps(event, ensure_ascii=False) + "\r\n\r\n").encode()
             # Transport write boundaries can split UTF-8 and JSON; they are not tokens.
@@ -78,6 +81,18 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIsNone(result["completion_tokens"])
         self.assertIsNone(result["estimated_tpot_ms"])
+        self.assertIsNone(result["cached_tokens"])
+
+    def test_cached_tokens_only_when_the_server_reports_them(self):
+        cases = [
+            {"model": "cached", "want": 32},
+            {"model": "normal", "want": None},
+        ]
+        for case in cases:
+            with self.subTest(case["model"]):
+                result = self.request(case["model"])
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["cached_tokens"], case["want"])
 
     def test_incomplete_stream_is_failure(self):
         result = self.request("truncated")
@@ -107,6 +122,22 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(record["summary"]["failed"], 0)
             self.assertIsNone(record["summary"]["output_tok_per_s"])
             self.assertIsNone(record["summary"]["estimated_tpot_ms"])
+            self.assertIsNone(record["summary"]["cached_tokens"])
+            self.assertIsNone(record["summary"]["cache_hit_requests"])
+
+    def test_cli_summarizes_reported_cache_hits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "results.json"
+            result = subprocess.run([
+                sys.executable, str(ROOT / "examples/stream-bench.py"),
+                "--base-url", self.url, "--model", "cached", "--requests", "3",
+                "--warmup", "0", "--shared-prefix", "--output", str(target),
+            ], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads(target.read_text())["summary"]
+            self.assertEqual(summary["cached_tokens"]["n"], 3)
+            self.assertEqual(summary["cached_tokens"]["p50"], 32)
+            self.assertEqual(summary["cache_hit_requests"], 3)
 
 
 if __name__ == "__main__":
