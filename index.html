@@ -416,13 +416,15 @@
       <header class="ch-h"><span class="num">00A</span><div><p class="eyebrow">先动手</p><h2>一张 T4，直接试 Qwen3.5</h2></div></header>
       <p>主线保留 <strong>Qwen3.5-9B W4A16</strong>。先用它做真实中文问答，再观察首包、生成速度、显存与调度。通用注意力先讲清楚，遇到混合结构时再解释 GDN；不要求先换旧模型。</p>
       <div class="grid-2">
-        <article class="card"><h3>第一次运行</h3><p>Linux + Docker + NVIDIA Container Toolkit。固定引擎镜像与模型 revision，使用 FP16 激活、4096 上下文、并发调度上限 1。关闭思考、CUDA Graph 与前缀缓存，逐项加回。</p></article>
+        <article class="card"><h3>第一次运行</h3><p>Linux + Docker + NVIDIA Container Toolkit。已经在 GPU Pod 里、没有 Docker 时，用 <code>RUNTIME=native</code> 把同一组参数交给本机的 vLLM 0.18.1。固定引擎版本与模型 revision，使用 FP16 激活、4096 上下文、并发调度上限 1。关闭思考、CUDA Graph 与前缀缓存，逐项加回。</p></article>
         <article class="card"><h3>验证边界</h3><p>以下是对照模型卡与源码整理的起步配置。尚无本项目 T4 的成功运行记录。W4A16 兼容、GDN 内核兼容、显存够用要分别验证；不把命令写出来就当成已跑通。</p></article>
       </div>
       <pre><code>git clone https://github.com/evenchen6/vllm-sglang-handbook.git
 cd vllm-sglang-handbook
-# 先按实验指南确认容器能识别 T4，再启动
+# 先按实验指南第 2 节确认 GPU 环境，再启动（默认用 Docker）
 bash scripts/serve-vllm-t4.sh
+# 或者：已在 GPU Pod、没有 Docker，同一组参数交给本机的 vllm==0.18.1
+RUNTIME=native bash scripts/serve-vllm-t4.sh
 
 # 服务就绪后，在同一机器的另一个终端执行
 python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></pre>
@@ -1040,13 +1042,16 @@ docker run --rm --gpus device=0 --ipc=host \
 
     <section class="chapter" id="vllm-run" data-core="1">
       <header class="ch-h"><span class="num">17</span><div><p class="eyebrow">T4 主实验</p><h2>Qwen3.5-9B W4A16：启动与关键旋钮</h2></div></header>
-      <p>固定 <code>vllm/vllm-openai:v0.18.1</code>，依据是 RedHatAI 量化模型卡列出的服务评估版本；它不是声称最新或最快。模型 revision 也固定在启动脚本中。先按 <a href="docs/t4-qwen35-lab.md">实验指南</a>确认驱动、容器 GPU 与 FP16 可用，避免混装 PyTorch/CUDA。</p>
-      <p>把两段时间分开。从容器启动到 <code>/v1/models</code> 返回，主要是读权重、分配缓存和编译，只在重启时发生。之后每条请求的 TTFT 才是 prefill。指南一次只改一个变量，会反复重启，加载时间很容易被当成模型变慢。记下这段墙钟时间，不要写进 tok/s。</p>
+      <p>固定 <code>vllm/vllm-openai:v0.18.1</code>，依据是 RedHatAI 量化模型卡列出的服务评估版本；它不是声称最新或最快。模型 revision 也固定在启动脚本中。先按 <a href="docs/t4-qwen35-lab.md">实验指南</a>确认驱动、容器（或原生环境）的 GPU 与 FP16 可用，避免混装 PyTorch/CUDA。</p>
+      <p>没有 Docker 时，<code>RUNTIME=native</code> 用同一份参数调用本机 vLLM 0.18.1 的 <code>vllm serve</code>，同样只绑 127.0.0.1。环境要 Python 3.10–3.13；PyPI 上这一版的 x86_64 wheel 只有 manylinux_2_31，glibc 要 ≥ 2.31，el8 系的 2.28 装不上。Pod 能换镜像时，直接用同一个 <code>vllm/vllm-openai:v0.18.1</code> 作 Pod 镜像，依赖与 Docker 路径相同。不要改用 <code>python -m vllm.entrypoints.openai.api_server</code>：0.18.1 的这个入口不读位置参数里的模型，会起默认模型。</p>
+      <p>把两段时间分开。从服务启动（容器或本机进程）到 <code>/v1/models</code> 返回，主要是读权重、分配缓存和编译，只在重启时发生。之后每条请求的 TTFT 才是 prefill。指南一次只改一个变量，会反复重启，加载时间很容易被当成模型变慢。记下这段墙钟时间，不要写进 tok/s。</p>
       <pre><code># 完整默认命令先查看，不下载、不启动
 DRY_RUN=1 bash scripts/serve-vllm-t4.sh
 
 # 在 T4 上尝试启动；初次会下载模型与镜像
 bash scripts/serve-vllm-t4.sh
+# 或者：已在 GPU Pod、没有 Docker，同一组参数交给本机的 vllm==0.18.1
+RUNTIME=native bash scripts/serve-vllm-t4.sh
 
 # 另一个终端：等待服务就绪后测试
 curl http://127.0.0.1:8000/v1/models
@@ -1062,12 +1067,12 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output</code></p
         <tr><td><code>--no-enable-prefix-caching</code></td><td>首次运行关闭前缀复用</td><td>对照时看日志里的块大小，并把 Mamba 模式原文抄下。Qwen3.5 在 v0.18.1 开着前缀缓存时是 <code>align</code>（这一版的 <code>all</code> 只给支持它的模型），关掉则是 <code>none</code>。v0.32 起只剩 <code>align</code> / <code>none</code></td></tr>
         <tr><td>（不传）异步调度</td><td>0.18.1 默认自动开启；日志 <code>Asynchronous scheduling is enabled.</code></td><td><code>ASYNC_SCHED=0</code> 传 <code>--no-async-scheduling</code> 做对照；T4 一步较长，预期差别小，用数据确认</td></tr>
       </tbody></table>
-      <pre><code># 并发调度实验：停掉旧容器后重新启动
+      <pre><code># 并发调度实验：停掉旧服务后重新启动（原生方式同样在前面加 RUNTIME=native）
 MAX_SEQS=4 bash scripts/serve-vllm-t4.sh
 python3 examples/stream-bench.py --requests 12 --concurrency 4 \
   --label 9b-c4 --output results/9b-c4.json</code></pre>
       <p>先检查输出质量与 <code>finish_reason</code>，再比较速度。思考模式另加客户端 <code>--thinking</code>；<code>max_tokens</code> 同时限制思考与答案长度，不能只看首次 reasoning 很快就认定答案很快。该脚本默认非思考，采样参数来自 Qwen3.5 模型卡。</p>
-      <div class="callout warn">这套组合尚未在本项目的 T4 上实测。降低上下文只能缓解容量问题，不能修复缺失的 GPU kernel 或 dtype 数值错误。失败阶段、报错原文与完整环境要记录。9B 若不可用，可手动选择 <code>PROFILE=4b-fp16</code>；仍是 Qwen3.5，且是另一份实验。</div>
+      <div class="callout warn">这套组合尚未在本项目的 T4 上实测，Docker 与原生两种运行方式都是。降低上下文只能缓解容量问题，不能修复缺失的 GPU kernel 或 dtype 数值错误。失败阶段、报错原文与完整环境要记录。9B 若不可用，可手动选择 <code>PROFILE=4b-fp16</code>；仍是 Qwen3.5，且是另一份实验。</div>
     </section>
 
     <section class="chapter" id="sglang" data-core="1">
@@ -1114,10 +1119,10 @@ python3 examples/stream-bench.py --requests 12 --concurrency 4 \
       <header class="ch-h"><span class="num">19</span><div><p class="eyebrow">进阶对照</p><h2>主线做完之后，怎样读 SGLang</h2></div></header>
       <p>先在 vLLM 上做完前缀对照，再读 SGLang。本项目没有 T4 + Qwen3.5-9B W4A16 的 SGLang 配方。不能拿「某版本支持 T4」证明这份 checkpoint 的 GDN、量化和 FP16 都能加载。安装页上的 BF16、262144 上下文命令不要照抄。</p>
       <div class="callout ok"><strong>先在已跑通的 vLLM 上完成前缀对照，并留下这些数：</strong>
-        <ol><li>停服务并以 <code>PREFIX_CACHE=0</code> 启动，固定长 system 前缀，只改 user 后缀。</li>
-        <li>预热后顺序请求；用 <code>--shared-prefix</code> 保存 TTFT。同时记下容器启动到 <code>/v1/models</code> 的墙钟时间，不要混进 TTFT。</li>
-        <li>停服务，以 <code>PREFIX_CACHE=1</code> 重启同一 checkpoint，再预热、测量。</li>
-        <li>从启动日志抄下块大小 N、Mamba/GDN 模式原文、激活 / KV dtype、注意力后端。Qwen3.5 在 v0.18.1 开着前缀缓存时应为 <code>align</code>，照抄；<code>none</code> 表示没有这份检查点。若看到 <code>all</code>，说明换了模型或手动传了 <code>--mamba-cache-mode</code>。v0.32 起开 APC 用 <code>align</code>，关掉用 <code>none</code>。</li>
+        <ol><li>停服务并以 <code>PREFIX_CACHE=0</code> 启动（原生方式是 <code>RUNTIME=native PREFIX_CACHE=0</code>，两组用同一种运行方式），固定长 system 前缀，只改 user 后缀。</li>
+        <li>预热后顺序请求；用 <code>--shared-prefix</code> 保存 TTFT。同时记下服务启动到 <code>/v1/models</code> 的墙钟时间，不要混进 TTFT。</li>
+        <li>停服务，以 <code>PREFIX_CACHE=1</code>（原生：<code>RUNTIME=native PREFIX_CACHE=1</code>）重启同一 checkpoint，再预热、测量。</li>
+        <li>从启动日志抄下块大小 N、Mamba/GDN 模式原文、激活 / KV dtype、注意力后端。Qwen3.5 在 v0.18.1 开着前缀缓存时应为 <code>align</code>，照抄；<code>none</code> 表示没有这份检查点。若看到 <code>all</code>，说明换了模型或手动传了 <code>--mamba-cache-mode</code>。<code>RUNTIME=native</code> 跑的是同一份 0.18.1 代码，预期相同。v0.32 起开 APC 用 <code>align</code>，关掉用 <code>none</code>。</li>
         <li>从 <code>/metrics</code> 抄下 prefix cache 的 queries 与 hits，用原字段名。命中长度应是 N 的整数倍。没有命中或请求短于 N，就记成这次没有复用。</li></ol>
       </div>
       <p>然后只回答四个是否：加载器能否读这份 W4A16、能否强制 FP16、GDN 在 SM75 上有没有内核、上下文能不能先收到 4096。有一项不成立就停。若某一版确实用同一 checkpoint 起了服务，用下面的客户端，并只比三段：就绪时间、同一条 shared-prefix 的 TTFT 与命中、并发升高时 TTFT 和 token 间隔谁在变。</p>

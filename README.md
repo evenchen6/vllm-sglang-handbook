@@ -17,22 +17,28 @@ cd vllm-sglang-handbook
 bash scripts/serve-vllm-t4.sh
 ```
 
+已经在 GPU Pod 里、没有 Docker 时，按指南第 2 节准备 vLLM 0.18.1（Pod 能换镜像就直接用 `vllm/vllm-openai:v0.18.1`，否则自建 Python 3.10–3.13 的 venv，系统 glibc 要 ≥ 2.31），再用同一组参数启动：
+
+```bash
+RUNTIME=native bash scripts/serve-vllm-t4.sh
+```
+
 服务就绪后，在同一机器的另一个终端运行（客户端只用 Python 标准库）：
 
 ```bash
 python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output
 ```
 
-默认尝试 `RedHatAI/Qwen3.5-9B-quantized.w4a16`，FP16 激活，4096 上下文，并发调度上限 1。配套客户端默认关闭思考；服务初始关闭前缀缓存和 CUDA Graph，以缩小首次启动的排障范围。脚本固定模型 revision 与引擎镜像版本；`DRY_RUN=1 bash scripts/serve-vllm-t4.sh` 可先查看完整命令。
+默认尝试 `RedHatAI/Qwen3.5-9B-quantized.w4a16`，FP16 激活，4096 上下文，并发调度上限 1。配套客户端默认关闭思考；服务初始关闭前缀缓存和 CUDA Graph，以缩小首次启动的排障范围。脚本固定模型 revision 与引擎版本（Docker 用 `v0.18.1` 镜像，原生方式检查 `vllm==0.18.1`）；`DRY_RUN=1 bash scripts/serve-vllm-t4.sh` 可先查看完整命令。
 
-**验证状态：** 文档对照官方模型卡与对应版本源码；网页交互、脚本语法和 HTTP/SSE 客户端在本地验证。本项目维护环境没有 T4，尚未完成该组合的真实 GPU 启动、质量与性能验证；不提供虚构的显存峰值或 tok/s。若量化或 GDN 内核失败，按指南定位；同代 Qwen3.5-4B 是可选的独立实验，不会自动替换 9B。
+**验证状态：** 文档对照官方模型卡与对应版本源码；网页交互、脚本语法和 HTTP/SSE 客户端在本地验证，启动脚本的两种运行方式只检查了命令拼装。本项目维护环境没有 T4，尚未完成该组合的真实 GPU 启动、质量与性能验证（Docker 与原生都是）；不提供虚构的显存峰值或 tok/s。若量化或 GDN 内核失败，按指南定位；同代 Qwen3.5-4B 是可选的独立实验，不会自动替换 9B。
 
 ## 仓库内容
 
 | 路径 | 用途 |
 | --- | --- |
 | `index.html` | 无构建步骤的交互手册 |
-| `scripts/serve-vllm-t4.sh` | 固定版本的 T4 启动命令与可调参数 |
+| `scripts/serve-vllm-t4.sh` | 固定版本的 T4 启动命令与可调参数；`RUNTIME=docker`（默认）或 `RUNTIME=native` |
 | `examples/stream-bench.py` | 流式问答、客户端延迟和并发闭环实验 |
 | `examples/trace-generation.py` | 可选：Qwen3.5-4B 的逐次前向、混合缓存与 CPU-GPU 同步观测 |
 | `docs/` | 实验步骤、原理说明、结果模板 |
@@ -48,4 +54,4 @@ bash -n scripts/serve-vllm-t4.sh
 git diff --check
 ```
 
-协议测试使用本机模拟 HTTP/SSE 服务，不需要 GPU；通过这些检查不代表 T4 GPU 内核验证通过。
+协议测试使用本机模拟 HTTP/SSE 服务，启动脚本测试用假的 `docker` / `python` 检查两种运行方式拼出的命令，都不需要 GPU；通过这些检查不代表 T4 GPU 内核验证通过。

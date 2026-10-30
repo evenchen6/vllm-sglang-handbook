@@ -9,7 +9,7 @@
 | GPU | 单张 T4，SM75 | 按用户现有设备设计 |
 | 服务模型 | `RedHatAI/Qwen3.5-9B-quantized.w4a16` | 同代 9B；部分线性权重 INT4 |
 | 模型 revision | `a398088c4228b0ae0c8c78df88fd1e4bf445f068` | 固定本次检查到的权重与配置 |
-| 引擎镜像 | `vllm/vllm-openai:v0.18.1` | 量化模型卡列出的服务评估版本。实验命令用这一版；块大小、状态模式和 dtype 的看法见第 6 节 |
+| 引擎版本 | 镜像 `vllm/vllm-openai:v0.18.1`；没有 Docker 时装同版本 `vllm==0.18.1` | 量化模型卡列出的服务评估版本。实验命令用这一版；块大小、状态模式和 dtype 的看法见第 6 节 |
 | 激活 / 未量化权重 | 显式 FP16（`--dtype half`） | 避免把 BF16 配置直接套到 T4 |
 | KV | `auto`，跟随 FP16 | 暂不引入独立的 KV 量化变量 |
 | 上下文 | 4096（输入 + 输出） | 先跑短请求，后按实测增加 |
@@ -38,9 +38,9 @@ W4A16 不意味着所有参数恰好 4bit。这份 checkpoint 的量化 `ignore`
 
 **同日开源的 DeepInfer 不在这张卡上跑。** DeepSeek 2026-10-20 开源的推理框架 [DeepInfer](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md) 只支持 NVIDIA SM100 和华为昇腾 950（构建要 CUDA 13 或 CANN 9.2），T4 是 SM75；它服务的 DeepSeek-V4.1-Flash 在 NVIDIA 上的回归测试也要 4 张卡起步。本指南只在讲原理时引用它和配套的 deepseek-recipe，实验命令仍是 vLLM 0.18.1。
 
-## 2. 先确认容器能用 GPU
+## 2. 先确认运行环境能用 GPU
 
-需要 Linux、Docker、NVIDIA 驱动与 NVIDIA Container Toolkit。宿主机先执行：
+首选 Linux、Docker、NVIDIA 驱动与 NVIDIA Container Toolkit。已经在 GPU Pod 里、没有 Docker 的情况见本节后半。宿主机先执行：
 
 ```bash
 nvidia-smi
@@ -65,6 +65,31 @@ docker run --rm --gpus device=0 --entrypoint python \
 docker image inspect vllm/vllm-openai:v0.18.1 --format '{{json .RepoDigests}}'
 ```
 
+**已经在 GPU Pod 里、没有 Docker。** K8s Pod 里一般跑不了 Docker（嵌套容器要特权模式），不必硬装。启动脚本的 `RUNTIME=native` 把同一组引擎参数交给本机的 vLLM 进程（第 3 节）。vLLM 0.18.1 从哪来，二选一：
+
+- **Pod 能换镜像：**把 Pod 镜像直接设成 `vllm/vllm-openai:v0.18.1`，`command` 改成 `sleep infinity` 再进去操作（这个镜像的默认入口是 `vllm serve`）。镜像里的 `python3` 已装好 vLLM 0.18.1，依赖和 Docker 路径相同，不用再装。digest 用 `kubectl get pod YOUR_POD -o jsonpath='{.status.containerStatuses[0].imageID}'` 查。
+- **只能用现有系统：**自建 venv。先查两条门槛：`python3 --version` 要 3.10–3.13（0.18.1 的 Requires-Python）；`ldd --version` 的 glibc 要 ≥ 2.31（PyPI 上 x86_64 只有 manylinux_2_31 的 wheel）。el8 系（RHEL 8 及其衍生版）是 glibc 2.28，pip 会报 `No matching distribution found for vllm==0.18.1`，列出的只有更老或更新的版本；不加 `--only-binary` 时还会转去编译源码包。不要因此换版本，也不要等源码编译：换了版本就不是这份实验。回到上一条，或换一台满足条件的机器。
+
+venv 和权重缓存放在空间够的数据盘上，例如 `/data/vllm-lab`；PyTorch 与 CUDA 运行库就要占几个 GB。按 [v0.18.1 安装文档](https://docs.vllm.ai/en/v0.18.1/getting_started/installation/gpu/)用 uv，它会自己下载 Python 3.12，不依赖系统里的旧版本（没有 uv 时，系统自带的 Python 3.9 也能 `python3 -m pip install --user uv`）：
+
+```bash
+uv venv /data/vllm-lab/.venv --python 3.12 --seed --managed-python
+source /data/vllm-lab/.venv/bin/activate
+uv pip install 'vllm==0.18.1' --torch-backend=cu129 --only-binary vllm
+```
+
+不用 uv 时，用 3.10–3.13 的解释器建好 venv，再执行 `python -m pip install 'vllm==0.18.1' --only-binary=vllm --extra-index-url https://download.pytorch.org/whl/cu129`。两种写法装的都是 cu129 的 PyTorch，和镜像、和 PyPI 上 vLLM wheel 的 CUDA 12.9 构建一致；PyPI 默认的 torch 2.10.0 带的是 CUDA 12.8 运行库。
+
+然后在这个环境里做同一项检查；venv 的依赖清单代替镜像 digest 进记录：
+
+```bash
+nvidia-smi
+python3 -c 'import torch, vllm; print("vllm", vllm.__version__); print("torch", torch.__version__, "CUDA", torch.version.cuda); print("available", torch.cuda.is_available()); print("GPU", torch.cuda.get_device_name(0)); print("capability", torch.cuda.get_device_capability(0)); x=torch.ones((32,32), device="cuda", dtype=torch.float16); print("FP16 matmul", (x@x).shape)'
+mkdir -p results && python3 -m pip freeze > results/pip-freeze.txt
+```
+
+判断标准与上面相同。镜像和 wheel 都按 CUDA 12.9 构建；驱动显示的 CUDA Version 更旧时（例如 535 驱动显示 12.2），靠 NVIDIA 对 CUDA 12.x 的小版本兼容运行，用镜像也是这样。本项目没有在这种组合上验证，以这段检查和启动日志为准。
+
 ## 3. 启动 9B，先做一次真实问答
 
 在仓库根目录执行：
@@ -74,9 +99,20 @@ DRY_RUN=1 bash scripts/serve-vllm-t4.sh
 bash scripts/serve-vllm-t4.sh
 ```
 
-首次需要下载镜像和权重，给磁盘、内存与下载时间留出空间。默认缓存目录为仓库的 `.cache/huggingface`；可设置绝对路径 `HF_CACHE_DIR` 复用已有缓存。脚本前台启动容器，保留终端查看日志；停止用 Ctrl+C。脚本不自动换模型、不自动升 nightly，也不自动重试掩盖错误。
+已在 GPU Pod 里、没有 Docker，按第 2 节备好 vLLM 0.18.1 之后，在前面加 `RUNTIME=native`；venv 没激活时再加 `PYTHON=/data/vllm-lab/.venv/bin/python`：
 
-另开一个终端，在**同一台 T4 机器**上执行：
+```bash
+RUNTIME=native DRY_RUN=1 bash scripts/serve-vllm-t4.sh
+RUNTIME=native bash scripts/serve-vllm-t4.sh
+```
+
+两种方式共用脚本里同一份引擎参数，模型、revision 和各项开关都不变，只换拉起进程的那一层。镜像入口 `vllm serve` 换成 `python3 -m vllm.entrypoints.cli.main serve`，它就是 `vllm` 命令本身，只是固定用通过了版本检查的那个解释器。服务直接监听 `127.0.0.1:$PORT`。`GPU_DEVICE` 写进 `CUDA_VISIBLE_DEVICES`，`HF_CACHE_DIR` 写进 `HF_HOME`（目录结构与容器里的 `/root/.cache/huggingface` 相同）；这两个脚本变量没设时，沿用环境里已有的 `CUDA_VISIBLE_DEVICES` / `HF_HOME`，都没有才用默认的 0 和仓库的 `.cache/huggingface`。环境里的 vllm 不是 0.18.1 时，脚本直接退出并打印安装命令。不要改用 `python -m vllm.entrypoints.openai.api_server` 加同样的参数：0.18.1 的这个入口不读位置参数里的模型，会起默认的 `Qwen/Qwen3-0.6B`。
+
+后面各节的启动命令，原生方式都在前面加 `RUNTIME=native`（或先 `export RUNTIME=native`），其余变量含义不变。例如第 6 节的前缀对照，就是先后用 `RUNTIME=native PREFIX_CACHE=0` 和 `RUNTIME=native PREFIX_CACHE=1` 启动同一个脚本。
+
+首次需要下载镜像（原生方式没有这一步）和权重，给磁盘、内存与下载时间留出空间。默认缓存目录为仓库的 `.cache/huggingface`；可设置绝对路径 `HF_CACHE_DIR` 复用已有缓存，在 Pod 里可以指到数据盘，例如 `/data/vllm-lab/hf`。脚本前台启动服务，保留终端查看日志；停止用 Ctrl+C。脚本不自动换模型、不自动升 nightly，也不自动重试掩盖错误。
+
+另开一个终端，在**同一台 T4 机器**（或同一个 Pod）上执行：
 
 ```bash
 curl http://127.0.0.1:8000/v1/models
@@ -84,13 +120,13 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output \
   --prompt '请用中文解释 Go 的 goroutine 泄漏，给一个定位思路。'
 ```
 
-`/v1/models` 返回后再发请求；模型下载、编译与首次初始化不能混入稳态测试。记下从容器启动到这次 `/v1/models` 成功的墙钟时间。这是读权重和初始化，每条请求的 TTFT 从这之后才开始算。以后比较另一台引擎，比的也是这两段，而不是把加载时间写进 tok/s。服务别名为 `qwen3.5-9b`，不是权重仓库 ID。脚本只用 Python 标准库，不需要在宿主机安装模型依赖。端口默认绑定到 T4 主机的回环地址；从个人电脑访问远端 T4 时可建立 SSH 隧道：
+`/v1/models` 返回后再发请求；模型下载、编译与首次初始化不能混入稳态测试。记下从服务启动（容器或本机进程）到这次 `/v1/models` 成功的墙钟时间。这是读权重和初始化，每条请求的 TTFT 从这之后才开始算。以后比较另一台引擎，比的也是这两段，而不是把加载时间写进 tok/s。服务别名为 `qwen3.5-9b`，不是权重仓库 ID。脚本只用 Python 标准库，不需要在宿主机安装模型依赖。端口默认绑定到 T4 主机的回环地址；从个人电脑访问远端 T4 时可建立 SSH 隧道：
 
 ```bash
 ssh -L 8000:127.0.0.1:8000 YOUR_T4_HOST
 ```
 
-在个人电脑运行客户端即可；记录是否经过隧道，它会影响客户端延迟。
+在个人电脑运行客户端即可；记录是否经过隧道，它会影响客户端延迟。服务跑在 K8s Pod 里时，对应的做法是 `kubectl port-forward pod/YOUR_POD 8000:8000`，它连到 Pod 内的 127.0.0.1；在 Pod 里直接跑客户端也行，客户端只用标准库，系统自带的 Python 3.9 就够。
 
 启动日志里还有一行要抄：`Asynchronous scheduling is enabled.`（或 `disabled.`）。0.18.1 默认打开异步调度：CPU 排下一步、处理上一步输出的同时，GPU 接着跑当前这一步。按这一版[源码](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/vllm.py)，单卡、不开推测解码的这套配置预期是 enabled。它为什么值得看，第 5 节再说。
 
@@ -154,10 +190,11 @@ python3 examples/stream-bench.py --requests 12 --concurrency 4 --label c4 --outp
 
 ## 6. 先在 vLLM 上做混合模型前缀对照
 
-保持同一模型 revision、精度、token 预算、并发等条件。每组都重启服务，再预热；不把冷启动混进测量。先顺序请求，让前一条的缓存有机会可用：
+保持同一模型 revision、精度、token 预算、并发等条件，两组也用同一种运行方式（都用 Docker 或都用原生）。每组都重启服务，再预热；不把冷启动混进测量。先顺序请求，让前一条的缓存有机会可用：
 
 ```bash
 # 第一组：关闭前缀缓存，服务前台启动后在另一终端测量
+# 原生方式：RUNTIME=native PREFIX_CACHE=0 bash scripts/serve-vllm-t4.sh
 PREFIX_CACHE=0 bash scripts/serve-vllm-t4.sh
 python3 examples/stream-bench.py --shared-prefix --requests 12 --concurrency 1 \
   --label prefix-off --output results/prefix-off.json
@@ -166,6 +203,7 @@ python3 examples/stream-bench.py --shared-prefix --requests 12 --concurrency 1 \
 停止第一组服务后：
 
 ```bash
+# 原生方式：RUNTIME=native PREFIX_CACHE=1 bash scripts/serve-vllm-t4.sh
 PREFIX_CACHE=1 bash scripts/serve-vllm-t4.sh
 python3 examples/stream-bench.py --shared-prefix --requests 12 --concurrency 1 \
   --label prefix-on --output results/prefix-on.json
@@ -175,7 +213,7 @@ python3 examples/stream-bench.py --shared-prefix --requests 12 --concurrency 1 \
 
 **先查块大小。** vLLM 的 APC 只缓存写满的块。Qwen3.5 是混合模型，一页要同时放下若干 token 的全注意力 KV，和这一层 GDN 的状态检查点（config 指定递推状态为 FP32，约 2.05 MiB）。检查点不随 token 变小，所以块会被调大：按 v0.18.1 源码，不开前缀缓存时是 16 × ⌈2.05 MiB ÷ (16 × 4 KiB)⌉ = 528 token。PREFIX_CACHE=1 时 Qwen3.5 走 `align`，块大小用的是同一条公式，N 应当不变；只有 `all` 模式才会按 Mamba kernel 的 chunk 再取整（[源码](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py#L175-L206)）。以启动日志的 `Setting attention block size to N tokens` 为准，再让共享 system 段明显长于 N。命中长度会是 N 的整数倍，user 后缀基本不会命中。
 
-**状态模式决定 GDN 能不能跟着 KV 一起复用。** 在 v0.18.1 上，关掉前缀缓存时是 `none`，不为复用保存这份状态。开着前缀缓存时，[这一版 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)写的默认是 `all`（在每个 `i * block_size` 都存状态），但只对实现了 Mamba 前缀缓存接口的模型成立（Jamba、Bamba、Mamba2、NemotronH 等）。Qwen3.5 在 0.18.1 没有实现这个接口，[配置校验](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py#L367-L383)会把它定成 `align`（只在调度步刚好结束在块边界时，保存这一步最后一个 token 的 GDN 状态），并打出一条 `Mamba cache mode is set to 'align' ... by default when prefix caching is enabled` 的警告。所以 `serve-vllm-t4.sh` 用 PREFIX_CACHE=1 时，日志里应该看到 `align`，PREFIX_CACHE=0 时是 `none`；把原文抄进记录。脚本不传 `--mamba-cache-mode`。手动加 `--mamba-cache-mode=all` 会在加载模型时直接报 `NotImplementedError`（[Qwen3.5 源码](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/qwen3_5.py#L565-L569)）。v0.32 起整个引擎去掉了 `all`，只剩开 APC 用 `align`、关掉用 `none`，所以这次在 0.18.1 上看到的 `align` 就是以后要带走的模型。APC 只命中写满的块，所以检查点和 KV 页落在同一条边界上，复用是否成立看命中长度是不是 N 的整数倍。
+**状态模式决定 GDN 能不能跟着 KV 一起复用。** 在 v0.18.1 上，关掉前缀缓存时是 `none`，不为复用保存这份状态。开着前缀缓存时，[这一版 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)写的默认是 `all`（在每个 `i * block_size` 都存状态），但只对实现了 Mamba 前缀缓存接口的模型成立（Jamba、Bamba、Mamba2、NemotronH 等）。Qwen3.5 在 0.18.1 没有实现这个接口，[配置校验](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py#L367-L383)会把它定成 `align`（只在调度步刚好结束在块边界时，保存这一步最后一个 token 的 GDN 状态），并打出一条 `Mamba cache mode is set to 'align' ... by default when prefix caching is enabled` 的警告。所以 `serve-vllm-t4.sh` 用 PREFIX_CACHE=1 时，日志里应该看到 `align`，PREFIX_CACHE=0 时是 `none`；把原文抄进记录。`RUNTIME=native` 跑的是同一份 0.18.1 代码，预期相同。脚本不传 `--mamba-cache-mode`。手动加 `--mamba-cache-mode=all` 会在加载模型时直接报 `NotImplementedError`（[Qwen3.5 源码](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/qwen3_5.py#L565-L569)）。v0.32 起整个引擎去掉了 `all`，只剩开 APC 用 `align`、关掉用 `none`，所以这次在 0.18.1 上看到的 `align` 就是以后要带走的模型。APC 只命中写满的块，所以检查点和 KV 页落在同一条边界上，复用是否成立看命中长度是不是 N 的整数倍。
 
 这条判断在别的混合结构里也成立：命中长度是所有状态能在同一条边界一起拿回来的最长整块前缀。DeepSeek-V4.1-Flash 的全局 KV 按 128 token 一块存；滑动窗口（SWA）的状态不在最后那块里，就退一块，把最后 128 个 token 重新前向，近似补回（SWA Bounded Replay）。SWA 能这样补，是因为它每层只看最近一个窗口；GDN 的状态累积整段历史，只能存检查点。细节见[原理补充](generation-and-cache.md)。
 
@@ -193,13 +231,15 @@ APC/Radix 主要节省重复的 **prefill**；不会消除 decode 对历史上�
 
 调 `BATCHED_TOKENS` 时记住它是 token 预算，不是时间预算：同样 1024 个新 token，接在长前缀后面时注意力要和更长的历史算，这一块更贵。DeepSeek 的 prefill 调度给每一步定一个时间预算，用拟合的代价模型（新 token 数、已算前缀长度）反解这一块能切多大（[Q&A](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf)）。在 T4 上比较 token 预算时，把输入长度一起记下。`ASYNC_SCHED=0` 那组同理，只改这一项，c1 和 c4 都测，比 `estimated_tpot_ms`。
 
-若使用另一个引擎镜像，可设置 `VLLM_IMAGE`，但这是新环境，需要保存 digest、help 和全部结果。版本升级后不要将它与原来的数据混为一组。换镜像之后仍然记第 6 节那三项：块大小、状态模式、queries/hits，外加就绪时间和同一条 shared-prefix 的 TTFT。
+若使用另一个引擎镜像，可设置 `VLLM_IMAGE`，但这是新环境，需要保存 digest、help 和全部结果。版本升级后不要将它与原来的数据混为一组。换镜像之后仍然记第 6 节那三项：块大小、状态模式、queries/hits，外加就绪时间和同一条 shared-prefix 的 TTFT。原生方式只认 vllm 0.18.1；想试别的版本就另建 venv，照 `DRY_RUN=1` 打印的参数手动起服务，同样按新环境记录。从 Docker 换到原生也算换环境：镜像里多带 nvcc 和 FlashInfer 预编译内核，pip 装出来的环境没有，两边的数据不放进同一组对照。
 
 ## 8. 出错时按阶段定位
 
 | 阶段 / 现象 | 先看什么 | 下一步 |
 | --- | --- | --- |
-| 容器识别不到 GPU | 驱动、Container Toolkit、同镜像 PyTorch 检查 | 先修基础环境 |
+| 容器 / Pod 识别不到 GPU | 驱动、Container Toolkit 或 Pod 的 GPU 资源、同环境 PyTorch 检查 | 先修基础环境 |
+| 原生：pip 找不到 0.18.1，或开始编译源码包 | `python3 --version`（3.10–3.13）、`ldd --version`（glibc ≥ 2.31） | 换满足条件的环境，或用 `vllm/vllm-openai:v0.18.1` 作 Pod 镜像；不改装别的 vLLM 版本 |
+| 原生：进程直接被杀，没有 Python 报错 | Pod 的内存 limit，`dmesg` 或 `kubectl describe pod` 里的 OOM 记录 | 调大 Pod 内存；这是主机内存，与显存 OOM 分开处理 |
 | 下载失败 / 磁盘不足 | 网络、缓存盘容量、模型 revision | 处理下载；不改变模型参数掩盖问题 |
 | 加载权重 OOM | 实际 GPU 空闲容量、其他进程、未量化模块 | 清理本次实验资源或选择同代 4B；缩 KV 窗口不保证解决权重 OOM |
 | `no kernel image` / unsupported capability | SM75、量化内核、GDN / 普通注意力的具体栈 | 查对应版本支持；降低上下文通常无效 |
@@ -240,7 +280,7 @@ docker run --rm --gpus device=0 --ipc=host \
 
 本仓库没有声称跑通的 SGLang + Qwen3.5-9B + W4A16 + T4 配方。官方安装环境、SM75 内核、Qwen3.5 加载与量化要一起核对；“某版本支持 T4”不等于这份 checkpoint 能加载。下面是对照你已经跑过的 vLLM 实验该看什么，不是另一套启动命令。
 
-先把 vLLM 记录抄到一边：容器启动到 `/v1/models` 的时间、块大小 N、Mamba/GDN 模式、prefix cache 的 queries/hits、shared-prefix 开关两组的 TTFT、激活 / KV dtype、注意力后端。
+先把 vLLM 记录抄到一边：服务启动到 `/v1/models` 的时间（注明 Docker 还是原生）、块大小 N、Mamba/GDN 模式、prefix cache 的 queries/hits、shared-prefix 开关两组的 TTFT、激活 / KV dtype、注意力后端。
 
 再读 [SGLang 安装文档](https://docs.sglang.io/docs/get-started/install) 和 [Qwen3.5 模型卡](https://huggingface.co/Qwen/Qwen3.5-9B)，只回答四个是否：加载器能否读这份 W4A16、能否强制 FP16、GDN 在 SM75 上有没有内核、上下文能不能先收到 4096。有一项不成立就停，把缺口写进记录。不要照抄 BF16、262144 上下文的命令。
 
@@ -268,7 +308,8 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 \
 - [Qwen3.5-9B 模型卡](https://huggingface.co/Qwen/Qwen3.5-9B)：混合结构、文本模式、思考控制与采样参数。
 - [RedHatAI W4A16 模型卡](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16)：量化排除模块与评估环境（vLLM 0.18.1）。
 - [该 revision 的量化配置](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/config.json)。
-- [vLLM v0.18.1 GPU 安装](https://docs.vllm.ai/en/v0.18.1/getting_started/installation/gpu/) 与 [注意力后端表](https://docs.vllm.ai/en/v0.18.1/design/attention_backends/)：版本化的硬件/后端依据。
+- [vLLM v0.18.1 GPU 安装](https://docs.vllm.ai/en/v0.18.1/getting_started/installation/gpu/) 与 [注意力后端表](https://docs.vllm.ai/en/v0.18.1/design/attention_backends/)：版本化的硬件/后端依据。安装页写明 Python 3.10–3.13、wheel 默认按 CUDA 12.9 构建，并给出 uv 与 cu129 索引两种装法。
+- 原生运行方式（2026-10-30 核对）：[PyPI 上的 vllm 0.18.1](https://pypi.org/project/vllm/0.18.1/#files) 的 x86_64 wheel 只有 manylinux_2_31 一种；[镜像 Dockerfile](https://github.com/vllm-project/vllm/blob/v0.18.1/docker/Dockerfile#L841-L843) 的入口是 `vllm serve`；[`vllm serve`](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/entrypoints/cli/serve.py#L47-L51) 把位置参数里的模型写回 `--model`，[`api_server` 模块的直接入口](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/entrypoints/openai/api_server.py#L684-L696)没有这一步，模型退回[默认值](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/model.py#L104)。
 - [v0.18.1 CompressedTensors WNA16 源码](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py)：最低 capability 75 只是这条量化 scheme 的门槛，不是整模型验证。
 - [v0.18.1 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)：`none` / `all` / `align` 的定义。开着前缀缓存时，支持 Mamba 前缀缓存的模型默认是 `all`；Qwen3.5 不支持，[配置校验](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/model_executor/models/config.py#L367-L383)把它定成 `align`。[v0.32.0 说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)去掉 `all`，开 APC 用 `align`、关掉用 `none`。实验把 0.18.1 启动日志里的模式原文抄下。
 - [v0.18.1 APC 说明](https://docs.vllm.ai/en/v0.18.1/features/automatic_prefix_caching/) 与 [v0.18.1 APC 设计](https://docs.vllm.ai/en/v0.18.1/design/prefix_caching.html)、[v0.18.1 benchmark CLI](https://docs.vllm.ai/en/v0.18.1/cli/bench/serve/)。
