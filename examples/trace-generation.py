@@ -3,19 +3,36 @@
 
 The 9B compressed serving checkpoint is deliberately not loaded through this HF
 example. This smaller, same-generation model is only for five-step cache tracing.
+Needs transformers >= 5.2 (Qwen3_5ForConditionalGeneration); the vLLM 0.32 image
+ships 5.16-5.19.
 """
 import argparse
 import json
+
+
+def tensor_shapes(value):
+    """Shape of a tensor, or of the tensors a cache layer keeps per state index."""
+    if hasattr(value, "shape"):
+        return list(value.shape)
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, (list, tuple)):
+        shapes = [list(item.shape) for item in value if hasattr(item, "shape")]
+        if shapes:
+            return shapes[0] if len(shapes) == 1 else shapes
+    return None
 
 
 def cache_snapshot(cache):
     snapshot = []
     for index, layer in enumerate(getattr(cache, "layers", [])):
         shapes = {}
+        # transformers 5.x: full-attention layers hold `keys`/`values` tensors; linear-attention (GDN)
+        # layers hold `conv_states`/`recurrent_states` as {state_index: tensor}.
         for name in ("keys", "values", "conv_states", "recurrent_states"):
-            value = getattr(layer, name, None)
-            if hasattr(value, "shape"):
-                shapes[name] = list(value.shape)
+            shape = tensor_shapes(getattr(layer, name, None))
+            if shape is not None:
+                shapes[name] = shape
         snapshot.append({"layer": index, "type": type(layer).__name__, "shapes": shapes})
     return snapshot
 

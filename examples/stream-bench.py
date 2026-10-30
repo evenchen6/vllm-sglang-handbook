@@ -2,7 +2,9 @@
 """Small closed-loop OpenAI-compatible SSE experiment; Python standard library only.
 
 Network chunks are NOT tokens. Record text-chunk gaps, and estimate TPOT only
-when the server supplies completion_tokens. See docs/t4-qwen35-lab.md.
+when the server supplies completion_tokens. Prefix-cache hits per request come
+from usage.prompt_tokens_details.cached_tokens when the server reports them.
+See docs/t4-qwen35-lab.md.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -98,6 +100,8 @@ def run_request(base_url, model, messages, max_tokens=256, thinking=False,
         tokens = tokens if isinstance(tokens, int) and tokens >= 0 else None
         tpot = ((text_times[-1] - text_times[0]) * 1000 / (tokens - 1)
                 if tokens is not None and tokens > 1 else None)
+        details = usage.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else None
         return {
             "ok": True,
             "ttft_text_ms": (text_times[0] - started) * 1000,
@@ -109,7 +113,8 @@ def run_request(base_url, model, messages, max_tokens=256, thinking=False,
             "text_chunks": len(text_times),
             "completion_tokens": tokens,
             "prompt_tokens": usage.get("prompt_tokens"),
-            "prompt_tokens_details": usage.get("prompt_tokens_details"),
+            "prompt_tokens_details": details,
+            "cached_tokens": cached if isinstance(cached, int) and cached >= 0 else None,
             "finish_reason": finish_reason,
             "content": "".join(content_parts),
             "reasoning": "".join(reasoning_parts),
@@ -178,6 +183,8 @@ def main():
     good = [r for r in results if r["ok"]]
     all_tokens_known = bool(good) and all(r["completion_tokens"] is not None for r in good)
     total_tokens = sum(r["completion_tokens"] for r in good) if all_tokens_known else None
+    # Servers report this only when asked (vLLM --enable-prompt-tokens-details, SGLang --enable-cache-report).
+    cached = [r["cached_tokens"] for r in good if r["cached_tokens"] is not None]
     summary = {
         "requests": len(results), "successful": len(good), "failed": len(results) - len(good),
         "finish_length": sum(r.get("finish_reason") == "length" for r in good),
@@ -188,6 +195,8 @@ def main():
         "e2e_ms": distribution([r["e2e_ms"] for r in good]),
         "estimated_tpot_ms": distribution([r["estimated_tpot_ms"] for r in good]),
         "text_chunk_gap_ms": distribution([v for r in good for v in r["text_chunk_gaps_ms"]]),
+        "cached_tokens": distribution(cached),
+        "cache_hit_requests": sum(v > 0 for v in cached) if cached else None,
     }
     record = {
         "created_at": datetime.now(timezone.utc).isoformat(),
