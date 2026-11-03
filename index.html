@@ -395,6 +395,7 @@
           <li>2026-10-17 按 zero-to-sglang 第 4 章加深 KV，并加入屋顶线、采样、批处理、前缀缓存实验</li>
           <li>2026-10-20 对照 DeepInfer 与 deepseek-recipe，把异步调度、变长验证、有界状态重放、Wide-EP 与协议层写进对应章节</li>
           <li>2026-10-30 默认路径改为 vLLM 0.32.0，对照 SGLang 0.5.23；实验分 T4 受限、H20 主线两条轨道</li>
+          <li>2026-11-03 对照 LMSYS 的 HiCache 文章，把多卡下的前缀命中一致、草稿状态、存储布局与 decode 侧复用写进第 8、15、18 节旁注（SGLang 能力，单卡不跑）</li>
           <li>读者：推荐架构后台</li>
           <li>演示机：单张 T4（16GB）或单张 H20（约 96 GiB）</li>
           <li>主模型：T4 上 Qwen3.5-9B W4A16，H20 上 Qwen3.8-27B FP8，同一种 GDN 混合结构</li>
@@ -511,7 +512,7 @@ python3 examples/stream-bench.py --model qwen3.8-27b-fp8 --requests 1 --warmup 0
           <tr><td>QPS / 吞吐</td><td>throughput（req/s 或 tok/s）</td><td>更常看 token/s；长输出时 req/s 会掉</td></tr>
           <tr><td>p99 端到端延迟</td><td>拆成 TTFT + 后续 token 延迟</td><td>「多久开始吐字」与「吐字顺不顺」</td></tr>
           <tr><td>批处理（mini-batch）</td><td>continuous batching</td><td>请求可中途加入、完成即离开</td></tr>
-          <tr><td>特征缓存 / Embedding 缓存</td><td>KV cache；prefix / radix 缓存</td><td>KV 在 GPU 上随序列与并发增长</td></tr>
+          <tr><td>特征缓存 / Embedding 缓存</td><td>KV cache；prefix / radix 缓存</td><td>KV 在 GPU 上随序列与并发增长；SGLang 的 HiCache 再往下接主机内存和外部存储，像本地缓存 → Redis → 存储（第 18 节）</td></tr>
           <tr><td>分片 / 副本</td><td>TP / PP / DP / EP</td><td>TP 切层内运算；DP 像多副本抬吞吐</td></tr>
           <tr><td>限流 / 熔断 / 排队</td><td>max_num_seqs、队列、503、preemption</td><td>显存不够会抢占重算</td></tr>
           <tr><td>多租户 / 路由</td><td>模型路由、LoRA、served-model-name</td><td>网关 AB / 金丝雀与推荐一致</td></tr>
@@ -858,6 +859,7 @@ python3 examples/stream-bench.py --model qwen3.8-27b-fp8 --requests 1 --warmup 0
       <p>长 prefill 偏算力，小 batch decode 偏带宽。挤在同一次调度里时，一个长 prompt 会把正在吐字的请求的 token 间隔拉长。T4 上能看到的是：<code>max-num-seqs=1</code> 时后来的请求只能排队；调高之后，chunked prefill 让 prefill 和 decode 共享同一步。H20 的拐点低（FP8 74），只算权重的话三四十条并发就碰到；但每条序列每步还要读写一遍 GDN 状态（27B 约 0.31 GB），上面计算器在上下文 1024 时要到 B ≈ 84 才转进算力区，T4 上 9B 则一直在带宽区。过了拐点再加并发，每步时间开始随 B 变长。同时记下 TTFT 和逐步间隔，看变的是哪一项。</p>
       <p>把 prefill 和 decode 放到不同实例，是同一冲突的多机形态。prefill 池对着 TTFT，decode 池对着每人每秒 token，代价是把算好的 KV 送过去。收益出现在重算这段 prompt 比搬走 KV 更贵的长输入上。SGLang 在长 prompt 的 PD 负载上报告过吞吐最多增加 27%、p95 TTFT 降到约一半；那是他们的测量，单卡拆不开。<a class="cite" href="https://github.com/sgl-project/sglang/releases/tag/v0.5.22">出处</a></p>
       <p>生产里的 PD 还配着不同的并行尺度。DeepSeek 的 V4.1-Flash 用常见的 8 卡机做 prefill（专家并行 EP 2–8，显存够就尽量小），用 64–128 卡的超节点做 decode（Wide-EP，越宽越好），P、D 卡数约 1:1，KV 放独立存储。搬 KV 的成本跟 KV 大小直接相关：全局 KV 压到约 890 字节/token 后，P、D 分在相邻的两个机房也搬得动（大约每 8 张卡配 400 Gbps）。decode 的负载均衡同时看每张卡的请求数和 KV 总长，正好是上面屋顶线的 B 和上下文两个滑条；prefill 给每一步一个时间预算，用拟合的代价模型（新 token 数、已算前缀长度）反解 chunk 大小，而不是固定 token 数。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf">DeepInfer Q&amp;A</a></p>
+      <p class="explain"><strong>进阶 / 多机：PD 之后，前缀要在 decode 侧也命中一次。</strong>prefill 命中只省计算，decode 还得拿到这段 KV 才能生成；decode 不复用的话，多轮对话每轮都要把历史 KV 重传。SGLang 让 decode 也维护 Radix 树（<code>--disaggregation-decode-enable-radix-cache</code>，0.5.23 默认关），HiCache 再延伸到主机内存：decode 先匹配，把可复用边界 <code>decode_prefix_len</code> 报给 prefill，prefill 只发之后的后缀。博客的例子里 12K 的 prompt 只需远端传 4K；本地恢复和远端接收都完成才开始 decode。他们在 GLM-5.2-FP8、8×B300、TP8/EP8 的 86 轮多轮负载上测到平均 TTFT 降 25.4%、中位数降 60.3%。单卡拆不开，你的 <code>cached_tokens</code> 那一段，在 PD 里就是不必再传的那一段。<a class="cite" href="https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving/">LMSYS HiCache</a></p>
       <p>更早还有一段等待：权重从磁盘进 GPU，到服务就绪为止。它不是请求的 TTFT。本实验会为了只改一个变量而反复重启，所以要把这段墙钟时间单独记下。SGLang 的 InstantTensor 加载器针对这一段；项目称大约快 10 倍，同页例子是 DeepSeek-R1、8×H200、50 GB/s 存储，从 160 s 到 15.3 s。不是本手册的两个模型，也不是这两张卡。</p>
       <p>屋顶线没算 kernel 启动和卡间通信。一个用户、或推测解码一次只验证几行 token 时，每颗 kernel 的算术很少，时间花在等待上一颗写完，以及 all-reduce 上。高端 GPU 上的低延迟内核用依赖启动提前拉起下一颗 kernel，并把 all-reduce 叠进 GEMM 的收尾；也有把一整层收成一两次常驻 kernel 的做法。需要专用内核，两条轨道的实验都不跑。和第 14、15 节一起看。</p>
     </section>
@@ -1021,7 +1023,7 @@ docker run --rm --gpus device=0 --ipc=host \
         <article class="card"><h3>量化</h3><p>分清三口径，别混为一谈：<strong>Weight-only</strong>（如 W4A16 / AWQ / GPTQ：权重低压，激活多为 16bit）；<strong>W8A8</strong>（如 FP8/INT8 权重与激活量化；FP8 也可能仅用于权重或 KV）；<strong>KV quant</strong>（压 KV cache）。都换显存与带宽，需业务验收质量。T4 不支持 FP8 W8A8 加速（见官方兼容表），9B 演示用 W4A16；H20（SM90）有 FP8 张量核，27B 用官方的 FP8 块量化版，权重和激活都进 FP8 GEMM。</p></article>
         <article class="card"><h3>Speculative decoding</h3><p>草稿模型一次提议多个 token，目标模型在同一步里验证，接受则少做几次逐 token 的 decode。验证步往往只有几行，所以它和第 14 节的小 batch 延迟内核是同一类负载：算术少，启动和通信的空等占比高。主线都不开推测解码；H20 上可以把 Qwen3.8 自带的 MTP 头作为单独一组（实验第 7 步），低延迟插件两条轨道都不装。</p></article>
       </div>
-      <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制整份模型抬吞吐；<strong>EP</strong> 切 MoE expert。注意力数据并行是另一旋钮：多张卡上把不同请求的注意力分开算，份数不等于模型副本数。阅读服务参数时找这个份数（新文档写作 <code>--attn-dp-size</code>），不要把旧的布尔开关当成还要手写的步骤。单卡用不到；Pod 能拿到多张 H20 时，TP/EP 是这之后的一步。</p>
+      <p>并行一句话：<strong>TP</strong> 切层内权重；<strong>PP</strong> 按层切；<strong>DP</strong> 复制整份模型抬吞吐；<strong>EP</strong> 切 MoE expert。注意力数据并行是另一旋钮：多张卡上把不同请求的注意力分开算，份数不等于模型副本数。阅读服务参数时找这个份数（新文档写作 <code>--attn-dp-size</code>），不要把旧的布尔开关当成还要手写的步骤。单卡用不到；Pod 能拿到多张 H20 时，TP/EP 是这之后的一步。长上下文还有 <strong>CP</strong>（上下文并行），把一条长 prompt 的 prefill 分到多张卡。并行一多，前缀缓存就成了各 rank 共同的账：CP 下每张卡只存一部分页，PP 下每个 stage 只存自己的层，所有 rank 必须对「命中多长」得出同一个数，否则之后会出现形状对不上或集合通信卡住。SGLang HiCache 怎样处理，见第 18 节旁注。</p>
       <p><strong>推测解码验几个，看批大小。</strong>验证 k 个草稿就是这一步多算 k 行：带宽受限时几乎不加时间，多验划算；算力受限时每行都要付钱，只该验接受率高的。DeepSeek 的 DSpark 让草稿模块一次并行出 5 个 token，每个带一个预测接受率；调度器按「期望接受数 ÷ 步耗时」挑全批的验证集合，步耗时来自启动时实测的曲线。官方表格里，每 rank 16 并发时比固定验 5 个低 1.5%，96 并发时高 11%。社区常见配置是给一个 <code>num_speculative_tokens</code>。Qwen3.5 / Qwen3.8 都带 MTP 草稿层，0.32 的方法表里有 <code>mtp</code> 与 <code>qwen3_5_mtp</code>；<a href="https://recipes.vllm.ai/Qwen/Qwen3.8-27B">vLLM recipe</a> 的写法是 <code>--speculative-config '{"method":"mtp","num_speculative_tokens":3}'</code>，主线不开。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/csrc/engine/mtp_varlen.hpp">mtp_varlen</a> · <a class="cite" href="https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/config/speculative.py">0.32 推测解码配置</a></p>
       <p><strong>MoE 多卡时每一步要全员同步。</strong>注意力 DP 配专家 EP 时，MoE 的 all-to-all 要全员到齐，所以每一步所有 rank 一起走：DeepInfer 的调度器先让整组投票决定这一步做 prefill 还是 decode，没活的 rank 陪跑空步，步长由最慢的卡决定。EPLB 给热门专家放冗余副本、按近期统计周期性重排来压这个差距（DeepSeek 报告最慢 rank ÷ 平均约 1.05–1.09）。decode 喜欢宽 EP（DeepSeek 用 64–128 卡），因为每卡要读的专家更少。你的 9B 和 27B 都是稠密模型，用不到。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/csrc/engine/scheduler.hpp">scheduler</a> · <a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/deepinfer/model_executor/eplb/policy.py">EPLB</a></p>
     </section>
@@ -1136,6 +1138,14 @@ python3 examples/stream-bench.py --model qwen3.8-27b-fp8 --requests 64 --concurr
       <p>普通注意力的物理 KV 可按页存放；Radix 树通常在 CPU 上维护 token 前缀到缓存的索引。分页负责存储管理，Radix 负责查找与复用，也可共享物理页。缓存命中要求连续 token 前缀相同，并满足模型、位置与相关配置约束；不是任意相同句子都能复用。Qwen3.5 / Qwen3.8 还需一致的 GDN 状态检查点，不能只复用全注意力层的 KV。</p>
       <div class="callout"><strong>把实验室里的「块 = 4」换成你的配置。</strong>vLLM 的 APC <a href="https://docs.vllm.ai/en/v0.32.0/design/prefix_caching.html">只缓存写满的块</a>，命中按整块计；SGLang 的 <code>--page-size</code> 默认是 1，按 token 命中，淘汰策略默认 LRU（<a href="https://docs.sglang.io/docs/advanced_features/server_arguments">服务参数文档</a>），GDN 状态另由 <code>--mamba-radix-cache-strategy</code> 管。第 13 节算过，vLLM 0.32 跑这两个混合模型时块会被调到几百个 token（9B 528、27B 784，27B 配 FP8 KV 1568），因为这一页还要放下 GDN 检查点。开着前缀缓存时模式是 <code>align</code>，日志有一行 INFO；关掉是 <code>none</code>，没有这一行。判断标准是命中长度是否为块大小的整数倍。第 19 节的前缀实验里，共享的 system 段要比一块长；默认 32 行资料实算是 988 个 token、公共前缀 966，够 T4 和 H20 的一块，FP8 KV 时要改成 64 行。先在启动日志里查到实际块大小，再决定 <code>--prefix-lines</code>。</div>
       <p><strong>命中长度的通用规则：所有种类的状态都能在同一条边界拿回来的最长整块前缀。</strong>Qwen3.5 / Qwen3.8 在 vLLM 上是 KV 页加 GDN 检查点。DeepSeek-V4.1-Flash 是 128 token 一块的全局 KV 加 128 窗口的滑动窗口注意力：最后那块里没有 SWA，就退一块，把最后 128 个 token 和没命中的后缀重新前向，近似补回 SWA（SWA Bounded Replay），所以 SWA 不必落盘。SWA 每层只看一个窗口，才能这样补；GDN 状态累积整段历史，只能存检查点。它的全局 KV 落在独立 SSD 集群，agent 流量保留 3 天、chatbot 7 天，任何 prefill 机器都能命中任何前缀，所以 prefill 的负载均衡不做前缀亲和。显存里的 APC / Radix 只在本实例有效，多副本时要么把相同前缀送到同一副本，要么接受命中率下降。<a class="cite" href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf">DeepInfer Q&amp;A</a> · <a class="cite" href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash">模型卡</a></p>
+      <div class="callout"><strong>进阶 / 多机：SGLang HiCache 把这条规则带到多卡上。</strong>HiCache 是 SGLang 的分层缓存，把 Radix 树的复用从 GPU 显存延伸到主机内存和外部存储。并行一多，规则要加一条：<strong>所有 rank 对命中长度得出同一个数</strong>。LMSYS 的文章讲了四处做法，都能用本页的词理解：
+        <ul>
+          <li><strong>CP 按页分片：</strong>每张卡维护同一棵逻辑树、同一套逻辑页号，页号对卡数取模就是归属，本地地址也是算出来的，和第 13 节块表一样，「树只认逻辑号，地址交给内存池」。读前缀时每层先 all-gather 拼出完整 KV，所以命中省了重算，但还要付 gather 的钱；从主机换回来的页必须回到原来那张卡。</li>
+          <li><strong>PP 各 stage 一致：</strong>每个 stage 只存自己的层。异步拷贝完成的时刻各 stage 不同，各自判断会让锁和淘汰分叉，最后变成形状对不上。做法是由 PP0 定消费几条完成事件（<code>pp_sync</code>）往下传；从外部存储读时取各 rank 的最小命中长度。</li>
+          <li><strong>推测解码：</strong>目标模型命中前缀后，草稿模型还要这段历史，只恢复目标 KV 会降接受率，所以草稿的 KV 和状态一起存取。「所有种类的状态」也包括草稿的。</li>
+          <li><strong>统一 KV 布局：</strong>按「层 × 头」的固定网格切对象，键里带模型、KV dtype、页大小、分区网格，换一种并行配置也能读。这些字段不同就不能共享，和 H20 上 <code>KV_DTYPE=fp8</code> 让块大小从 784 变成 1568 是同一类约束。</li>
+        </ul>
+        边界：0.5.23 有 <code>--enable-hierarchical-cache</code>，但统一布局要专门的集成构建，而且目前不覆盖混合模型的缓存组件，Qwen3.5 / Qwen3.8 不在这条路径上。第 19 节的单卡对照不打开 HiCache。这些是 SGLang 的实现，不代表 vLLM 0.32 有同样的机制。PD 下 decode 侧的复用见第 8 节。<a class="cite" href="https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving/">LMSYS 2026-11-02</a> · <a class="cite" href="docs/generation-and-cache.md">原理补充</a></div>
     </section>
 
     <section class="chapter" id="sglang-run" data-core="1">
@@ -1159,6 +1169,7 @@ docker run --rm --gpus device=0 --ipc=host --shm-size 32g -p 127.0.0.1:30000:300
     --served-model-name qwen3.8-27b-fp8 --host 0.0.0.0 --port 30000 \
     --language-model-only --reasoning-parser qwen3 --context-length 32768 \
     --max-running-requests 64 --kv-cache-dtype auto --enable-cache-report --enable-metrics
+# 不加 --enable-hierarchical-cache：命中只看显存，才和 vLLM 那组可比（第 18 节旁注）
 
 # 同一个客户端，只换地址
 python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 \
@@ -1315,6 +1326,7 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 \
         <li>CUDA 兼容：<a href="https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html">NVIDIA 前向兼容</a>（<code>cuda-compat-13-0</code> 与 535+、570+ 兼容，只适用于数据中心卡） · <a href="https://github.com/vllm-project/vllm/pull/36579">vLLM PR #36579</a>（Marlin 在 SM90 上只带 PTX，小版本兼容下的报错）</li>
         <li>SGLang 0.5.23：<a href="https://github.com/sgl-project/sglang/tree/v0.5.23">v0.5.23 tag</a> · <a href="https://pypi.org/project/sglang/0.5.23/#files">PyPI</a> · <a href="https://docs.sglang.io/docs/get-started/install">安装指南</a>（只支持 CUDA 13） · <a href="https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B">Qwen3.8-27B cookbook</a>（H200 配方、GDN 状态池）</li>
         <li>加载、PD 与低延迟内核：<a href="https://github.com/sgl-project/sglang/releases/tag/v0.5.22">SGLang 对 InstantTensor 与 PD 的报告</a> · <a href="https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode">LMSYS 低延迟模式</a>。文中的 10 倍、27% 和 AgentX 数字来自这两页，不是 T4 或 H20 的实测</li>
+        <li>SGLang HiCache：<a href="https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving/">LMSYS 2026-11-02，HiCache 与多种并行、分布式服务</a>（CP 按页分片、PP 的 <code>pp_sync</code>、草稿状态、统一 KV 布局、decode 侧复用）。命中率与 TTFT 数字来自该文，不是 T4 或 H20 的实测。<code>--enable-hierarchical-cache</code> 与 <code>--disaggregation-decode-enable-radix-cache</code>（默认关）在 0.5.23 wheel 的源码里有；统一布局的参数没有</li>
         <li>DeepSeek 生产栈对照（2026-10-20 开源，<a href="https://x.com/deepseek_ai/status/2112476496283775135">官方 X 帖</a>）：<a href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md">DeepInfer README</a>（硬件、开源范围与缺口） · <a href="https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf">推理部署 Q&amp;A</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash">V4.1-Flash 模型卡</a>与 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/config.json">config</a> · <a href="https://github.com/deepseek-ai/deepseek-recipe/blob/935817c66f5d6e64838f419692545f06787e485f/README.zh.md">deepseek-recipe</a> · <a href="https://github.com/deepseek-ai/open-infra-index/tree/main/OpenSourcing_DeepSeek_Inference_Engine">open-infra-index 早前立场</a>。Q&amp;A 与模型卡里的数字是官方自述，不是 T4 或 H20 的实测</li>
         <li>SGLang：<a href="https://docs.sglang.io/docs/advanced_features/server_arguments">服务参数</a>（<code>--page-size</code> 默认 1，<code>--radix-eviction-policy</code> 默认 lru）</li>
         <li>Transformer 论文：<a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a></li>
@@ -2479,6 +2491,8 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 \
     { q: '异步调度主要消掉的是哪段时间？', opts: ['KV 页的尾部碎片', 'CPU 调度和后处理期间 GPU 的空等', '权重从磁盘加载', '网络回传'], a: 1, why: 'decode 一步是调度、前向、采样、后处理，CPU 那两段原本让 GPU 闲着。异步调度把它们和 GPU 前向错开一步，代价是 CPU 看到的长度落后一步。vLLM 0.32 默认开启，但不再打印那行日志，要对照就显式传开关。' },
     { q: '推测解码每步多验几个草稿，什么时候几乎不加时间？', opts: ['任何时候都不加', '带宽受限的小批 decode', '算力受限的大批 decode', '只有 prefill 时'], a: 1, why: '小批 decode 一步主要在读权重，多算几行几乎白送；算力受限时每行都要付钱。DSpark 按置信度挑验证集合：每 rank 16 并发时比固定验 5 个低 1.5%，96 并发时高 11%。' },
     { q: 'DeepSeek-V4.1-Flash 的 SWA 缺了只重放 128 个 token 就能近似补回，Qwen3.5 的 GDN 状态为什么不行？', opts: ['GDN 状态太大', 'GDN 递推状态累积整段历史，没有固定窗口可重放', 'vLLM 不支持重算', 'GDN 没有状态'], a: 1, why: 'SWA 每层只看最近 128 个 token；GDN 把全部历史压进一个状态。所以前者可以不落盘、缺了重放一小段，后者只能在块边界存检查点。' },
+    { q: 'PD 分离、decode 侧不做前缀复用时，多轮对话每一轮？', opts: ['只传新增的那一段 KV', '要把整段历史 KV 从 prefill 再传一遍', '不需要任何 KV', 'decode 自己重算全部 prompt'], a: 1, why: 'prefill 侧命中只省计算，decode 仍要拿到 KV 才能生成。SGLang 让 decode 也维护 Radix 树（HiCache 延伸到主机内存），把可复用边界 decode_prefix_len 报给 prefill，只传后缀；LMSYS 的例子里 12K 的 prompt 只需远端传 4K。' },
+    { q: 'PP 多个 stage 各有一棵缓存树，HiCache 为什么要由 PP0 定「这次消费几条完成事件」？', opts: ['为了少用显存', '各 stage 看到异步拷贝完成的时刻不同，各自判断会让命中长度和淘汰状态分叉', '因为只有 PP0 有 GPU', '为了关掉前缀缓存'], a: 1, why: '只用 GPU 缓存时，同样的操作序列给出同样的树；异步拷贝让各 stage 的判断不同步。SGLang 用 pp_sync 让后面的 stage 照 PP0 的数消费，外部存储读取取最小命中长度，否则之后会出现形状不匹配。' },
     { q: '用户消息里写了 &lt;|im_start|&gt; 这几个字，安全的 prompt 编码应该把它编成？', opts: ['一个控制 token', '若干普通 token', '直接丢弃', 'EOS'], a: 1, why: '控制 token 只该由模板插入。deepseek-recipe 记下模板插入的区间，只有区间内按 special 编码，正文里的同样拼写按普通文本编码。' }
   ];
   const quizBox = $('#quiz-box');
@@ -2565,6 +2579,8 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 \
     ['Wide-EP', 'decode 用很宽的专家并行（DeepSeek 用 64–128 卡），每卡要读的专家更少，同一专家每步攒到更多 token。'],
     ['SWA Bounded Replay', 'DeepSeek-V4.1-Flash 的滑动窗口 KV 缺失时，只重放最近 128 个 token 近似补回，因此不必落盘。依赖模型结构，不是通用开关。'],
     ['Special token 注入', '用户正文里写出控制符的拼写，被整串 tokenize 成真控制 token。防法是只把模板插入的区间按 special 编码（deepseek-recipe 的做法）。'],
+    ['HiCache（SGLang）', 'SGLang 的分层前缀缓存：Radix 树的复用从 GPU 显存延伸到主机内存和外部存储。多卡时要让所有 rank 对命中长度一致，并一起恢复草稿模型的状态。不是 vLLM 的功能名。'],
+    ['CP（上下文并行）', '把一条长 prompt 的 prefill 分到多张卡。SGLang HiCache 下 KV 按页分给各 rank，各 rank 共用一套逻辑页号，读前缀时逐层 all-gather。'],
     ['批不变（batch invariance）', '同一请求单跑和混批跑得到逐位相同的数值，需要专门的内核。固定 seed 只管随机数。']
   ];
   const gloss = $('#gloss-list');

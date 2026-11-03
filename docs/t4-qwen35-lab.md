@@ -311,6 +311,8 @@ APC/Radix 主要节省重复的 **prefill**；不会消除 decode 对历史上�
 
 「命中长度 = 所有种类的状态都能在同一条边界拿回来的最长整块前缀」在别的混合结构里也成立。DeepSeek-V4.1-Flash 的全局 KV 按 128 token 一块存；滑动窗口（SWA）的状态不在最后那块里，就退一块，把最后 128 个 token 重新前向，近似补回（SWA Bounded Replay，0.32 的 DeepSeek-V4 实现里也有）。SWA 能这样补，是因为它每层只看最近一个窗口；GDN 的状态累积整段历史，只能存检查点。细节见[原理补充](generation-and-cache.md)。
 
+**进阶 / 多机，只读。** 这组对照里缓存只在一张卡的显存里，命中多长由一个调度器说了算。SGLang 的 HiCache 把复用延伸到主机内存和外部存储，并要在 CP、PP、推测解码、PD 分离下保持命中（[LMSYS 2026-11-02](https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving/)），多出来的问题都能用这一节的词说清：各 rank 必须对命中长度取同一个值；开推测解码时草稿模型的状态也要一起恢复；存储格式（模型、KV dtype、页大小、分区）不同就不能共享，和这里 `KV_DTYPE=fp8` 让 N 翻倍是同一类约束；PD 分离后 decode 侧命中的那段不用再从 prefill 传。机制和版本边界见[原理补充](generation-and-cache.md)。这些是 SGLang 的多机能力，单卡两条轨道都不做，也不是 vLLM 0.32 的行为。
+
 ## 7. 每次只增加一个变量
 
 **T4** 依次尝试：`MAX_LEN=8192`、`MAX_SEQS=2/4`、`EAGER=0` 开 CUDA Graph、调整 `BATCHED_TOKENS`、前缀缓存、思考模式、`ASYNC_SCHED=0` 关掉异步调度。不要一次全开。更大上下文既受 KV 容量也受实际输入/输出需求影响，模型卡的长上下文建议不作为这张卡的首次验收条件。
@@ -414,7 +416,7 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 --model qw
 先把 vLLM 记录抄到一边：就绪时间（注明 Docker 还是原生）、块大小 N、Mamba 模式那一行、`cached_tokens` 序列、shared-prefix 开关两组的 TTFT、激活 / KV dtype、注意力后端。然后只比下面三段：
 
 - **就绪时间。** 权重从磁盘进 GPU 的等待，和请求的 TTFT 不是一回事。SGLang 的 InstantTensor 加载器针对前一段，项目报告称加载约快 10 倍；同页的测量是 DeepSeek-R1、8×H200、50 GB/s 存储，从 160 s 降到 15.3 s，不是 27B，也不是 H20。0.32 的 vLLM 也把 `instanttensor` 列为依赖。你能比的是同一块盘、同一份权重上的就绪时间。
-- **同一条 shared-prefix 的 TTFT 和缓存命中。** 协议与第 6 节相同：顺序、预热、只改 user 后缀。SGLang 的 KV 按 token 进 Radix 树，GDN 状态另按 `--mamba-radix-cache-strategy` 和 `--mamba-track-interval`（默认 256）存，命中粒度和 vLLM 的 N 不是一回事；两边都以 usage 里的 `cached_tokens` 和各自的 `/metrics`（SGLang 是 `sglang:cache_hit_rate`、`sglang:cached_tokens_total`）为准。两引擎都能跑通之前，不做吞吐胜负。
+- **同一条 shared-prefix 的 TTFT 和缓存命中。** 协议与第 6 节相同：顺序、预热、只改 user 后缀。SGLang 的 KV 按 token 进 Radix 树，GDN 状态另按 `--mamba-radix-cache-strategy` 和 `--mamba-track-interval`（默认 256）存，命中粒度和 vLLM 的 N 不是一回事；两边都以 usage 里的 `cached_tokens` 和各自的 `/metrics`（SGLang 是 `sglang:cache_hit_rate`、`sglang:cached_tokens_total`）为准。上面的命令不带 `--enable-hierarchical-cache`：HiCache 会把放不下的前缀留在主机内存里，命中就不再只取决于显存，和 vLLM 那组比的就不是同一件事。两引擎都能跑通之前，不做吞吐胜负。
 - **prefill 与 decode 是否还挤在同一步。** 单卡拆不开。PD 分离把长 prompt 的 prefill 和持续的 decode 放到不同实例，用搬走 KV 换掉「重算 prompt」和「decode 被 prefill 挡住」。SGLang 在长 prompt 负载上报告过吞吐最多增加 27%、p95 TTFT 降到约一半，那是他们的测量。单卡上能看到的，是第 5 节里 TTFT 与 token 间隔怎样一起变。
 
 注意力的数据并行是另一件事：多张卡上把不同请求的注意力分开算，份数不等于模型副本数。阅读服务参数时，找「注意力 DP 的大小」（新文档里的 `--attn-dp-size`），不要把旧的布尔开关 `--enable-dp-attention` 当成还要手写的步骤。单卡实验用不到。
@@ -433,5 +435,6 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 --model qw
 - SGLang：[安装指南](https://docs.sglang.io/docs/get-started/install)（只支持 CUDA 13、SM75 的后备参数）、[Qwen3.8-27B cookbook](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B)（H200 配方、GDN 状态池与 `--mamba-full-memory-ratio`）、[v0.5.23 tag](https://github.com/sgl-project/sglang/tree/v0.5.23)、[PyPI 上的 0.5.23](https://pypi.org/project/sglang/0.5.23/#files)；[SGLang 对 InstantTensor 与 PD 的报告](https://github.com/sgl-project/sglang/releases/tag/v0.5.22)：第 10 节里的加载时间和长 prompt PD 数字。
 - 硬件：[NVIDIA T4 规格](https://www.nvidia.com/en-us/data-center/tesla-t4/)。H20 没有 NVIDIA 官网产品页，屋顶线用的 4.0 TB/s、148 / 296 TFLOPS 来自服务器厂商与媒体流传的规格表（例如 [Tom's Hardware 转述的规格](https://www.tomshardware.com/tech-industry/nvidia-readies-new-ai-and-hpc-gpus-for-china-market-report)），只作估算。
 - [LMSYS：低延迟内核](https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode)：PDL、GEMM 收尾 all-reduce、monokernel，以及 GB300 / MI355X 上的 AgentX 数字。
+- [LMSYS：HiCache 与多种并行、分布式服务](https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving/)（2026-11-02）：第 6 节的多机旁注与第 10 节不开 `--enable-hierarchical-cache` 的理由。
 - [DeepInfer README](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md) 与[推理部署 Q&A](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf)：硬件只支持 SM100 / 昇腾 950；第 6、7 节的 SWA 命中规则和 prefill 时间预算来自 Q&A，是 DeepSeek 生产栈的做法。[deepseek-recipe 的流式解码器](https://github.com/deepseek-ai/deepseek-recipe/blob/935817c66f5d6e64838f419692545f06787e485f/deepseek-recipe/src/stream/decoder.rs)：第 4 节的 UTF-8 缓冲。
 - 历史参照：[vLLM v0.18.1 的 cache 配置](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/cache.py)（当时还有 `all`）与 [v0.18.1 的异步调度日志](https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/config/vllm.py)。
