@@ -9,7 +9,7 @@
 
 - [图解手册](https://evenchen6.github.io/vllm-sglang-handbook/)：模型结构、生成时序、KV、分页、调度与选型。
 - [T4 / H20 双轨实验指南](docs/t4-qwen35-lab.md)：先选轨道，再做环境检查（含驱动与 CUDA 13）、启动、流式体验、并发与前缀缓存对照、SGLang 对照。
-- [原理补充](docs/generation-and-cache.md)：张量形状、首 token、控制 token、混合缓存与块大小、调度与性能瓶颈（T4 与 H20 两套屋顶线），并对照 DeepSeek 开源的 DeepInfer / deepseek-recipe 的做法（DeepInfer 只支持 SM100 / 昇腾 950，不在这两张卡上跑）。
+- [原理补充](docs/generation-and-cache.md)：张量形状、首 token、控制 token、混合缓存与块大小、调度与性能瓶颈（T4 与 H20 两套屋顶线），并对照 DeepSeek 开源的 DeepInfer / deepseek-recipe 的做法（DeepInfer 只支持 SM100 / 昇腾 950，不在这两张卡上跑）；多卡时前缀命中怎样保持一致，对照 SGLang HiCache 的 LMSYS 文章，作为进阶旁注，单卡不跑。
 - [实验记录模板](docs/experiment-template.md)：记录实际环境与结果。
 
 ## 开始
