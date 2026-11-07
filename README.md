@@ -1,6 +1,6 @@
 # 从 Transformer 到 vLLM / SGLang
 
-面向有深度学习与后台开发基础、刚开始接触 LLM 推理的工程师。学习路径跟当前稳定版：**vLLM 0.32.0**，对照用 **SGLang 0.5.23**。按手上的机器分两条轨道，模型都是 Gated DeltaNet 混合结构，在 vLLM 里是同一个类：
+面向有深度学习与后台开发基础、刚开始接触 LLM 推理的工程师。学习路径固定在 **vLLM 0.32.0**，对照用 **SGLang 0.5.23**。0.32.0 是本手册的学习固定版本，不是最新版：vLLM 0.33.0 已于 2026-11-02 正式发布（2026-11-07 核对），本手册暂不跟进，见实验指南开头。按手上的机器分两条轨道，模型都是 Gated DeltaNet 混合结构，在 vLLM 里是同一个类：
 
 - **T4 受限轨**：单张 T4（SM75，标称 16 GB），`Qwen3.5-9B` W4A16、FP16 激活、短上下文，看显存与内核的边界。
 - **H20 主线轨**：单张 H20（SM90，约 96 GiB），`Qwen3.8-27B` FP8（BF16 作对照），看吞吐、前缀缓存、并发与 KV 容量。
@@ -14,7 +14,7 @@
 
 ## 开始
 
-需要 Linux、可用的 NVIDIA 驱动、Docker 与 NVIDIA Container Toolkit；在 K8s GPU Pod 里没有 Docker 时见下文。先阅读实验指南第 2 节：默认镜像 `vllm/vllm-openai:v0.32.0` 是 CUDA 13 构建，驱动低于 R580 时，数据中心卡（T4、H20）在 R535/R570 上要加 `CUDA_COMPAT=1`，或改用 `-cu129` 镜像。
+需要 Linux、可用的 NVIDIA 驱动、Docker 与 NVIDIA Container Toolkit；在 K8s GPU Pod 里没有 Docker 时见下文。先阅读实验指南第 2 节：默认镜像 `vllm/vllm-openai:v0.32.0` 是 CUDA 13 构建，驱动低于 R580 时，数据中心卡（T4、H20）在 R535/R570 上要加 `CUDA_COMPAT=1`，或改用 `-cu129` 镜像。`-cu129`（CUDA 12.9）只是 0.32.0 的备选构建，vLLM 从 0.33.0 起不再发布。
 
 ```bash
 git clone https://github.com/evenchen6/vllm-sglang-handbook.git
