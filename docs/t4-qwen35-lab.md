@@ -1,13 +1,13 @@
 # T4 / H20 双轨：用 vLLM 0.32 学 Qwen 混合模型推理
 
-默认学习路径跟当前稳定版：**vLLM 0.32.0**（2026-10-18 发布），对照用 **SGLang 0.5.23**。两条轨道共用一份启动脚本、一个客户端和同一份记录模板：
+默认学习路径固定在 **vLLM 0.32.0**（2026-10-18 发布），对照用 **SGLang 0.5.23**。这是本手册的学习固定版本，不是 vLLM 的最新版：截至 2026-11-07，vLLM 0.33.0 已于 2026-11-02 正式发布（GitHub Release 名 v0.33.0，挂在 `v0.33.0rc3` tag 上、未标 prerelease，`v0.33.0` tag 指向同一提交；PyPI wheel 和 `vllm/vllm-openai:v0.33.0` 镜像同日上线）。本手册的命令、参数和预期都按 0.32.0 核对，没有跟进 0.33。两条轨道共用一份启动脚本、一个客户端和同一份记录模板：
 
 - **T4 受限轨**：单张 T4（SM75，标称 16 GB），`Qwen3.5-9B` 的 W4A16 量化版、FP16 激活、短上下文。学的是放不放得下、哪些内核在 SM75 上能用、前缀缓存和显存的边界。T4 没有 FP8 张量核。
 - **H20 主线轨**：单张 H20（SM90，约 96 GiB；主机可能有 8 张卡，Pod 通常只暴露 1 张），`Qwen3.8-27B` 的 FP8 版，BF16 版作对照。学的是吞吐、前缀缓存、并发和 KV 容量，从 0.32 的默认行为出发。
 
 两个模型在 vLLM 0.32 里是同一个类 `Qwen3_5ForConditionalGeneration`：都是「3 层 Gated DeltaNet（GDN）+ 1 层全注意力」的混合结构，块大小、状态模式和前缀命中的规则一样，只是层数和头数不同。T4 上弄懂的，到 H20 上直接用。
 
-命令和预期来自 0.32.0 / 0.5.23 的源码、文档、官方镜像元数据，以及在无 GPU 机器上用 0.32.0 的参数解析与配置代码做的检查（核对日期 2026-10-30）。**本项目维护环境没有 T4 或 H20，这些组合都没有真实 GPU 启动、质量与性能验证**；文中没有实测的显存峰值、tok/s 或日志。写「预期」的地方，以你自己的 0.32 启动日志和 `/metrics` 为准。
+命令和预期来自 0.32.0 / 0.5.23 的源码、文档、官方镜像元数据，以及在无 GPU 机器上用 0.32.0 的参数解析与配置代码做的检查（核对日期 2026-10-30；两个引擎的发布状态 2026-11-07 再核对）。**本项目维护环境没有 T4 或 H20，这些组合都没有真实 GPU 启动、质量与性能验证**；文中没有实测的显存峰值、tok/s 或日志。写「预期」的地方，以你自己的 0.32 启动日志和 `/metrics` 为准。
 
 ## 先选轨道
 
@@ -81,7 +81,7 @@ docker --version   # 在 K8s Pod 里通常没有，见本节后半
 
 记录 GPU 名、驱动版本、总显存、其他进程占用。T4 的「16GB」是产品标称，`nvidia-smi` 可见容量常约 15360 MiB。输出顶部的 CUDA Version 是驱动支持的最高 CUDA 版本，不等于镜像里 PyTorch 的 CUDA 构建版本。
 
-**驱动决定用哪个 CUDA 构建。** 0.32.0 的默认镜像 `vllm/vllm-openai:v0.32.0` 和 PyPI wheel 都按 CUDA 13.0 构建，正常需要 R580 以上的驱动；官方另发了 CUDA 12.9 的 `v0.32.0-cu129` 镜像和 wheel。
+**驱动决定用哪个 CUDA 构建。** 0.32.0 的默认镜像 `vllm/vllm-openai:v0.32.0` 和 PyPI wheel 都按 CUDA 13.0 构建，正常需要 R580 以上的驱动；官方另发了 CUDA 12.9 的 `v0.32.0-cu129` 镜像和 wheel，这是本手册 0.32.0 的备选构建。0.33.0 起 vLLM 只发 CUDA 13.0 的 wheel 和镜像，不再发布 `-cu129`（[#62575](https://github.com/vllm-project/vllm/pull/62575)），所以别指望更新的版本也有 cu129 这条退路。
 
 | 驱动 | 做法 | 说明 |
 | --- | --- | --- |
@@ -386,7 +386,7 @@ transformers 5.x 的缓存里，全注意力层是 `DynamicLayer`（`keys` / `va
 
 ## 10. 用 SGLang 0.5.23 做对照
 
-**版本事实（2026-10-30 核对）。** SGLang 0.5.23 的 git tag（`297e54f`）和 PyPI wheel 当天已发布，GitHub 上还没有这一版的 Release 说明页。官方镜像 `lmsysorg/sglang:v0.5.23` 是 CUDA 13.0.3，入口是 NVIDIA 的 `nvidia_entrypoint.sh`，后面直接跟 `sglang serve …`。[安装文档](https://docs.sglang.io/docs/get-started/install)写明 SGLang 只支持 CUDA 13，`v0.5.19-cu129` 是最后一个 CUDA 12 镜像。wheel 要 Python ≥ 3.11、glibc ≥ 2.34（`manylinux_2_34`），el8 装不上，Pod 里同样用镜像。依赖 torch 2.14.1、transformers 5.19.0，和 vLLM 0.32 的 torch 2.13.0 不同，**两个引擎不要装进同一个环境**。
+**版本事实（2026-10-30 核对，Release 页 2026-11-07 补核）。** SGLang 0.5.23 的 git tag（`297e54f`）和 PyPI wheel 于 2026-10-30 发布；GitHub 的 [Release 说明页](https://github.com/sgl-project/sglang/releases/tag/v0.5.23)晚几天，于 2026-11-02 22:14:10 UTC（上海时间 11-03 06:14）发布，现已可查。官方镜像 `lmsysorg/sglang:v0.5.23` 是 CUDA 13.0.3，入口是 NVIDIA 的 `nvidia_entrypoint.sh`，后面直接跟 `sglang serve …`。[安装文档](https://docs.sglang.io/docs/get-started/install)写明 SGLang 只支持 CUDA 13，`v0.5.19-cu129` 是最后一个 CUDA 12 镜像。wheel 要 Python ≥ 3.11、glibc ≥ 2.34（`manylinux_2_34`），el8 装不上，Pod 里同样用镜像。依赖 torch 2.14.1、transformers 5.19.0，和 vLLM 0.32 的 torch 2.13.0 不同，**两个引擎不要装进同一个环境**。
 
 **T4：只读不跑。** 本仓库没有 SGLang + Qwen3.5-9B + W4A16 + T4 的核对过的配方。官方文档说 FlashInfer 在 SM75 上出问题时改用 `--attention-backend triton --sampling-backend pytorch`，但 W4A16 加载、FP16、GDN 在 SM75 上的内核要一起成立，加上 CUDA 13 对驱动的要求，任何一项不成立就停，把缺口写进记录。不要照抄 BF16、262144 上下文的命令。
 
@@ -423,16 +423,17 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 --model qw
 
 低延迟插件（PDL、GEMM 收尾里的 all-reduce、AMD monokernel）要 GB300 / MI355X 这一档的 GPU，两条轨道都不打开。只有两引擎都用同一 checkpoint/revision、精度、长度、采样与前缀条件跑通之后，才把吞吐放在一起比。
 
-## 官方依据（核对日期 2026-10-30）
+## 官方依据（核对日期 2026-10-30，发布状态 2026-11-07 补核）
 
 实验命令对照 vLLM v0.32.0 与 SGLang v0.5.23。正文里的外部测量分别来自 SGLang 对加载与 PD 的报告，以及 LMSYS 的低延迟内核文章，都不是 T4 或 H20 上的结果。
 
 - [vLLM v0.32.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)：默认镜像与 PyPI wheel 是 CUDA 13.0，另有 `-cu129`；Python 3.11–3.14；`transformers>=5.16.1,<5.20.0`；删除 `mamba_cache_mode="all"`；`max_tokens` 不再从上下文预留。[PyPI 上的 0.32.0](https://pypi.org/project/vllm/0.32.0/#files)：x86_64 wheel 为 `manylinux_2_28`。镜像元数据（Docker Hub 注册表）：两个标签的入口都是 `vllm serve`，`TORCH_CUDA_ARCH_LIST` 含 7.5 与 9.0，CUDA 13.0.2 / 12.9.1。
+- 发布状态（2026-11-07 核对）：[vLLM v0.33.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.33.0rc3)，GitHub API 显示 `name` 为 v0.33.0、`tag_name` 为 `v0.33.0rc3`、`prerelease: false`，2026-11-02 10:10:05 UTC 发布，`v0.33.0` tag 与 `v0.33.0rc3` 指向同一提交 `4ba787e`；同日 [PyPI 上的 0.33.0](https://pypi.org/project/vllm/0.33.0/#files) 上传，Docker Hub 有 `v0.33.0`、没有 `v0.33.0-cu129`。说明里写明 CUDA 12.9 wheel 与 `-cu129` 镜像不再发布（[#62575](https://github.com/vllm-project/vllm/pull/62575)）。
 - [0.32 安装文档里的旧驱动说明](https://github.com/vllm-project/vllm/blob/v0.32.0/docs/getting_started/installation/gpu.cuda.inc.md)：CUDA 13 镜像正常需要 R580，兼容模式支持 R535 与 R570，只限专业和数据中心卡；[NVIDIA 前向兼容](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)：`cuda-compat-13-0` 与 535+、570+ 兼容，错误码 803 / 804，PTX JIT 不受小版本兼容那条限制；[vLLM 的兼容开关实现](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/env_override.py)与[默认 fork 的进程方式](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/utils/system_utils.py)。[PR #36579](https://github.com/vllm-project/vllm/pull/36579) 描述了 Marlin 在 SM90 上只带 PTX、cu129 配旧驱动时报错的情形。
 - 0.32 源码：[`vllm serve` 把位置参数写回 `--model`](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/entrypoints/cli/serve.py)，[`api_server` 模块已弃用](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/entrypoints/openai/api_server.py)；[cache 配置](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/config/cache.py)（`align` / `none`、`prefix_cache_retention_interval`）；[Mamba 模式与 Qwen3.5 状态 dtype](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/model_executor/models/config.py)；[混合块大小对齐](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/platforms/interface.py)；[调度器的检查点停靠点](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/core/sched/scheduler.py)；[注意力后端优先级](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/platforms/cuda.py)与 [FlashInfer 的 SM75 门槛](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/attention/backends/flashinfer.py)；[W4A16 内核顺序](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/model_executor/kernels/linear/__init__.py)；[服务默认的批大小](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/engine/arg_utils.py)；[异步调度的默认与兼容条件](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/config/vllm.py)；[prefix cache 指标](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/metrics/loggers.py)。
 - [0.32 APC 说明](https://docs.vllm.ai/en/v0.32.0/features/automatic_prefix_caching/)与 [0.32 benchmark CLI](https://docs.vllm.ai/en/v0.32.0/benchmarking/cli/)。
 - 模型：[Qwen3.5-9B 模型卡](https://huggingface.co/Qwen/Qwen3.5-9B)、[RedHatAI W4A16 模型卡](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16)（评估环境 vLLM 0.18.1）与[该 revision 的量化配置](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/config.json)；[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) 与 [FP8 版](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)的模型卡和[固定 revision 的 config](https://huggingface.co/Qwen/Qwen3.8-27B-FP8/blob/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a/config.json)；[vLLM recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)（`--reasoning-parser qwen3`、MTP 写法、单张 Hopper 用 TP1）。
-- SGLang：[安装指南](https://docs.sglang.io/docs/get-started/install)（只支持 CUDA 13、SM75 的后备参数）、[Qwen3.8-27B cookbook](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B)（H200 配方、GDN 状态池与 `--mamba-full-memory-ratio`）、[v0.5.23 tag](https://github.com/sgl-project/sglang/tree/v0.5.23)、[PyPI 上的 0.5.23](https://pypi.org/project/sglang/0.5.23/#files)；[SGLang 对 InstantTensor 与 PD 的报告](https://github.com/sgl-project/sglang/releases/tag/v0.5.22)：第 10 节里的加载时间和长 prompt PD 数字。
+- SGLang：[安装指南](https://docs.sglang.io/docs/get-started/install)（只支持 CUDA 13、SM75 的后备参数）、[Qwen3.8-27B cookbook](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B)（H200 配方、GDN 状态池与 `--mamba-full-memory-ratio`）、[v0.5.23 tag](https://github.com/sgl-project/sglang/tree/v0.5.23)、[v0.5.23 Release 说明](https://github.com/sgl-project/sglang/releases/tag/v0.5.23)（2026-11-02 22:14:10 UTC 发布）、[PyPI 上的 0.5.23](https://pypi.org/project/sglang/0.5.23/#files)；[SGLang 对 InstantTensor 与 PD 的报告](https://github.com/sgl-project/sglang/releases/tag/v0.5.22)：第 10 节里的加载时间和长 prompt PD 数字。
 - 硬件：[NVIDIA T4 规格](https://www.nvidia.com/en-us/data-center/tesla-t4/)。H20 没有 NVIDIA 官网产品页，屋顶线用的 4.0 TB/s、148 / 296 TFLOPS 来自服务器厂商与媒体流传的规格表（例如 [Tom's Hardware 转述的规格](https://www.tomshardware.com/tech-industry/nvidia-readies-new-ai-and-hpc-gpus-for-china-market-report)），只作估算。
 - [LMSYS：低延迟内核](https://www.lmsys.org/blog/2026-10-18-sglang-low-latency-mode)：PDL、GEMM 收尾 all-reduce、monokernel，以及 GB300 / MI355X 上的 AgentX 数字。
 - [LMSYS：HiCache 与多种并行、分布式服务](https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving/)（2026-11-02）：第 6 节的多机旁注与第 10 节不开 `--enable-hierarchical-cache` 的理由。
