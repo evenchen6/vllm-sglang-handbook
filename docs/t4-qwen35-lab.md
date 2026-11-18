@@ -109,7 +109,7 @@ SM75 仍在 0.34 的构建范围里：镜像元数据的 `TORCH_CUDA_ARCH_LIST` 
 | R535、R570（T4、H20 都是数据中心卡） | 加 `CUDA_COMPAT=1` | 前向兼容：镜像里自带 CUDA 13.0 的 compat 用户态驱动（`/usr/local/cuda-13.0/compat`，`libcuda.so.580.95.05`）。NVIDIA 的兼容矩阵把 `cuda-compat-13-0` 列为与 535+、570+ 分支兼容，没有给出分支内的最低小版本；文档的示例输出用的是 Tesla T4。PTX JIT 照常可用。按矩阵预期可行，**本项目没有在 535 驱动上验证过**。SGLang 0.5.23 只有 CUDA 13 镜像，两边对照也是这条路 |
 | 其他旧分支（如 R550，已不在兼容矩阵里），或兼容模式报 803/804 | 升级驱动到 R580+；不能升级时整体回退到 `VLLM_VERSION=0.32.0`（镜像 `v0.32.0-cu129`） | 回退是换了一个更旧的引擎，不只是换 CUDA：块大小回到 528 / 784 / 1568，没有 extensible KV cache（脚本给 H20 显式传旧手册的 0.90），第 6 节的数字要看[上一版手册](https://github.com/evenchen6/vllm-sglang-handbook/tree/afbaa89/docs/t4-qwen35-lab.md)。另外 CUDA 12.x 小版本兼容只覆盖预编译的 SASS，不能 JIT 更新的 PTX；部分内核（例如 Marlin 的权重重排）在 SM90 上只带 PTX，旧驱动会报 `the provided PTX was compiled with an unsupported toolchain` |
 
-T4（535.161.07）和 H20（535.247.01）都在 535 分支，按第二行走，和上一版手册钉 0.32.0 时的默认路径相同（0.32.0 的默认镜像同样是 CUDA 13）。这是按兼容矩阵和源码得出的预期，不是「两台都能跑」的结论：先用下面的检查片段确认 compat 生效，再启动服务。变的只是第三行：0.34 没有 cu129，兼容模式不行时只剩升级驱动或回退版本。两台机器尽量用同一个版本和 CUDA 构建，否则对照时要把它记成一个变量。
+T4（535.161.07）和 H20（535.247.01）都在 535 分支，按第二行走，和上一版手册钉 0.32.0 时的默认路径相同（0.32.0 的默认镜像同样是 CUDA 13）；变的只是第三行：0.34 没有 cu129，兼容模式不行时只剩升级驱动或回退版本。这是按兼容矩阵和源码得出的预期，不是「两台都能跑」的结论：先用下面的检查片段确认 compat 生效，再启动服务。两台机器尽量用同一个版本和 CUDA 构建，否则对照时要把它记成一个变量。
 
 `CUDA_COMPAT=1` 做两件事：设 `VLLM_ENABLE_CUDA_COMPATIBILITY=1`（vLLM 文档的开关），并在**进程启动之前**把 `/usr/local/cuda/compat`（官方镜像自带，指向 `cuda-13.0/compat`）放到 `LD_LIBRARY_PATH` 最前（NVIDIA 前向兼容文档的做法）。只设前者不够：vLLM 是在 Python 进程里改 `os.environ` 的 `LD_LIBRARY_PATH`，而 glibc 的加载器只在 exec 时读这个变量，所以这次修改只对之后 exec 出来的子进程生效，对当前进程和 fork 出来的子进程都无效；0.34 的 EngineCore 和 worker 默认仍是 fork（`VLLM_WORKER_MULTIPROC_METHOD=fork`）。本项目在本机用 `ctypes` 加载测试库复现了这一点，但没有在 535 驱动的 GPU 上验证整条链路。前向兼容只适用于数据中心和专业卡，消费级卡加载 compat 库会报错 803。
 
