@@ -1,13 +1,13 @@
-# T4 / H20 双轨：用 vLLM 0.32 学 Qwen 混合模型推理
+# T4 / H20 双轨：用 vLLM 0.34 学 Qwen 混合模型推理
 
-默认学习路径固定在 **vLLM 0.32.0**（2026-10-18 发布），对照用 **SGLang 0.5.23**。这是本手册的学习固定版本，不是 vLLM 的最新版：截至 2026-11-07，vLLM 0.33.0 已于 2026-11-02 正式发布（GitHub Release 名 v0.33.0，挂在 `v0.33.0rc3` tag 上、未标 prerelease，`v0.33.0` tag 指向同一提交；PyPI wheel 和 `vllm/vllm-openai:v0.33.0` 镜像同日上线）。本手册的命令、参数和预期都按 0.32.0 核对，没有跟进 0.33。两条轨道共用一份启动脚本、一个客户端和同一份记录模板：
+默认学习路径固定在 **vLLM 0.34.0**（2026-11-16 正式发布，截至 2026-11-18 是最新版），对照用 **SGLang 0.5.23**（同日核对仍是最新正式版，没有 1.0 的 tag、wheel 或镜像）。上一版手册钉的 0.32.0 只留作驱动回退（第 2 节）。两条轨道共用一份启动脚本、一个客户端和同一份记录模板：
 
 - **T4 受限轨**：单张 T4（SM75，标称 16 GB），`Qwen3.5-9B` 的 W4A16 量化版、FP16 激活、短上下文。学的是放不放得下、哪些内核在 SM75 上能用、前缀缓存和显存的边界。T4 没有 FP8 张量核。
-- **H20 主线轨**：单张 H20（SM90，约 96 GiB；主机可能有 8 张卡，Pod 通常只暴露 1 张），`Qwen3.8-27B` 的 FP8 版，BF16 版作对照。学的是吞吐、前缀缓存、并发和 KV 容量，从 0.32 的默认行为出发。
+- **H20 主线轨**：单张 H20（SM90，约 96 GiB；主机可能有 8 张卡，Pod 通常只暴露 1 张），`Qwen3.8-27B` 的 FP8 版，BF16 版作对照。学的是吞吐、前缀缓存、并发和 KV 容量，从 0.34 的默认行为出发。
 
-两个模型在 vLLM 0.32 里是同一个类 `Qwen3_5ForConditionalGeneration`：都是「3 层 Gated DeltaNet（GDN）+ 1 层全注意力」的混合结构，块大小、状态模式和前缀命中的规则一样，只是层数和头数不同。T4 上弄懂的，到 H20 上直接用。
+两个模型在 vLLM 0.34 里是同一个类 `Qwen3_5ForConditionalGeneration`：都是「3 层 Gated DeltaNet（GDN）+ 1 层全注意力」的混合结构，块大小、状态模式和前缀命中的规则一样，只是层数和头数不同。T4 上弄懂的，到 H20 上直接用。
 
-命令和预期来自 0.32.0 / 0.5.23 的源码、文档、官方镜像元数据，以及在无 GPU 机器上用 0.32.0 的参数解析与配置代码做的检查（核对日期 2026-10-30；两个引擎的发布状态 2026-11-07 再核对）。**本项目维护环境没有 T4 或 H20，这些组合都没有真实 GPU 启动、质量与性能验证**；文中没有实测的显存峰值、tok/s 或日志。写「预期」的地方，以你自己的 0.32 启动日志和 `/metrics` 为准。
+命令和预期来自 0.34.0 / 0.5.23 的源码、Release 说明、官方镜像元数据，以及在无 GPU 机器上用 0.34.0 的参数解析与配置代码（把 CUDA 平台伪装成 SM75 / SM90）做的检查（核对日期 2026-11-18）。**本项目维护环境没有 T4 或 H20，这些组合都没有真实 GPU 启动、质量与性能验证**；文中没有实测的显存峰值、tok/s 或日志。写「预期」的地方，以你自己的 0.34 启动日志和 `/metrics` 为准。
 
 ## 先选轨道
 
@@ -19,14 +19,31 @@
 
 两个入口只是把 `MACHINE` 固定成 `t4` / `h20`，再调用 `scripts/serve-vllm.sh`。`RUNTIME`、`PREFIX_CACHE`、`MAX_SEQS` 等开关在两台机器上含义相同，默认值按机器不同；`DRY_RUN=1` 打印完整命令。脚本参数原样追加到引擎参数末尾，同名参数以后出现的为准。
 
-旧版手册钉的 vLLM 0.18.1 只留作历史参照（T4 那份 W4A16 模型卡的评估版本是 0.18.1），不再是学习默认值。0.18.1 时的几条结论在 0.32 都变了：`all` 状态模式、`Asynchronous scheduling is …` 日志、Python 3.10、glibc 2.31 门槛。下文按 0.32 逐条重写。
+更早钉的 vLLM 0.18.1 只留作历史参照（T4 那份 W4A16 模型卡的评估版本是 0.18.1）：`all` 状态模式、`Asynchronous scheduling is …` 日志、Python 3.10 这些结论在 0.32 就已经变了。
+
+### 从 0.32 换到 0.34，哪些照旧、哪些要改
+
+照旧的是概念：混合模型的块大小要让一页同时放下 N 个 token 的 KV 和一层 GDN 状态；状态模式只有 `align` / `none`，由开不开前缀缓存决定；命中长度是 N 的整数倍，Marconi 式交汇点补存；异步调度默认开启；前向兼容的做法；两个引擎分开装。W4A16 在 T4 上仍按顺序试到 Marlin，注意力后端的选择也没变。
+
+要改的是数字和几处默认行为（都按 0.34.0 源码推断，未实测）：
+
+| 变化 | 0.32.0 | 0.34.0 | 对实验的影响 |
+| --- | --- | --- | --- |
+| 默认 `block_size` | 16 | 64（[#63231](https://github.com/vllm-project/vllm/pull/63231)；后端有首选值时用后端的，显式 `--block-size` 优先） | 混合块对齐从 16 变 64：N 从 528 / 784 / 1568 变成 **576 / 832 / 1600**（第 6 节） |
+| KV 显存 | 按 `gpu_memory_utilization`（默认 0.92）预留 | extensible KV cache 默认开：先预留虚拟地址，warmup 和 CUDA Graph 之后按实测剩余提交物理页（[#56492](https://github.com/vllm-project/vllm/pull/56492)）；不传 `--gpu-memory-utilization` 时上限是 1.0，关掉 extensible 时仍是 0.92 | H20 脚本不再传 0.90；T4 保留显式 0.85，0.34 会打印一条「这个上限把多少 GiB 挡在 KV 之外」的 WARNING（第 1 节） |
+| H20 上 `align` 的存法 | prefill 停在块边界存状态 | FlashInfer 的 GDN prefill 在一次前向里顺带输出边界状态，不再为此拆一步（[#60050](https://github.com/vllm-project/vllm/pull/60050)，0.33 起）；T4 走 Triton/FLA，仍然拆 | 命中位置和 `cached_tokens` 不变，T4 和 H20 在同一版本里开始不一样（第 6 节） |
+| GPU model runner | V1 与 V2 并存 | 只剩 Model Runner V2（[#63373](https://github.com/vllm-project/vllm/pull/63373)）。删的是 runner 的旧实现，V1 引擎（调度器、KV 管理）还在 | 正文里「V1 调度器」的说法照旧；环境里残留 `VLLM_USE_V2_MODEL_RUNNER=0` 会直接启动失败（`Model Runner V1 has been removed`），设成 1 只打 WARNING |
+| CUDA 构建 | 默认 CUDA 13.0，另有 `-cu129` | 只发 CUDA 13.0（0.33 起，[#62575](https://github.com/vllm-project/vllm/pull/62575)） | 驱动 R535 上只能走前向兼容，或回退到 0.32.0 cu129（第 2 节） |
+| 依赖 | torch 2.13.0，transformers 5.16–5.19 | torch 2.14.0，transformers ≥ 5.16.1、< 5.23 | 第 9 节可直接用 0.34 镜像；和 SGLang 0.5.23 的 torch 2.14.1 仍然不同 |
+
+`--block-size 16` 不能把旧行为全部换回来：T4 上会回到 528；H20 关前缀缓存时回到 784，但开前缀缓存时 FlashInfer 的 GDN 检查点要求 64 的倍数，N 仍是 832。想完整复现 0.32 的数字，就回到 0.32.0（`VLLM_VERSION=0.32.0`，第 2 节）或[上一版手册](https://github.com/evenchen6/vllm-sglang-handbook/tree/afbaa89/docs/t4-qwen35-lab.md)，而不是在 0.34 上叠参数。
 
 ## 1. 固定本次实验的条件
 
 | 项目 | T4 受限轨 | H20 主线轨 | 原因 |
 | --- | --- | --- | --- |
 | GPU | 单张 T4，SM75 | 单张 H20，SM90 | 按用户现有设备 |
-| 引擎 | vLLM 0.32.0，镜像 `vllm/vllm-openai:v0.32.0` | 同左 | 两台机器同一版本，记录才能放在一起看 |
+| 引擎 | vLLM 0.34.0，镜像 `vllm/vllm-openai:v0.34.0` | 同左 | 两台机器同一版本，记录才能放在一起看；回退到 0.32.0 时两台一起回退 |
 | 对照引擎 | 不跑（没有核对过的 SM75 配方） | SGLang 0.5.23，镜像 `lmsysorg/sglang:v0.5.23` | 第 10 节 |
 | 服务模型 | `RedHatAI/Qwen3.5-9B-quantized.w4a16` | `Qwen/Qwen3.8-27B-FP8`；对照 `Qwen/Qwen3.8-27B` | Qwen3.8 官方最小的就是 27B（另两档是约 180B 的 Flash-Next 和 2.4T MoE），它最小的 W4A16 版也有 19.5 GB，T4 放不下；9B 与 27B 是同一个 vLLM 类 |
 | 模型 revision | `a398088c4228b0ae0c8c78df88fd1e4bf445f068` | FP8 `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`，BF16 `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | 固定本次检查到的权重与配置 |
@@ -34,9 +51,10 @@
 | 激活 / 未量化权重 | FP16（`--dtype half`） | BF16（`--dtype bfloat16`） | T4 没有 BF16 张量核 |
 | KV | `auto`，跟随 FP16 | `auto`，跟随 BF16；`KV_DTYPE=fp8` 是单独一组 | 先不引入 KV 量化变量 |
 | 上下文 | 4096 | 32768（模型原生 262144） | 先跑短请求，后按实测增加 |
-| `max-num-seqs` / batched tokens | 1 / 1024 | 64 / 8192 | 8192 是 0.32 给 ≥70 GiB 卡的服务默认；64 够做 1–64 的并发曲线 |
-| 普通注意力 | `TRITON_ATTN` | 交给 vLLM 选（SM90 优先 `FLASH_ATTN`） | 0.32 在 SM75 上 FlashAttention 不可用、FlashInfer 被暂时禁用，自动选择也会落到 Triton |
-| CUDA Graph / 前缀缓存 | 首次都关 | 都开（0.32 默认） | T4 先缩小排障范围；H20 先看主线默认，对照时再关 |
+| `max-num-seqs` / batched tokens | 1 / 1024 | 64 / 8192 | 8192 是 0.34 给 70–160 GiB 卡的服务默认；64 够做 1–64 的并发曲线 |
+| 普通注意力 | `TRITON_ATTN` | 交给 vLLM 选（SM90 优先 `FLASH_ATTN`） | 0.34 在 SM75 上 FlashAttention 不可用（要 SM80）、FlashInfer 被暂时禁用，自动选择也会落到 Triton |
+| CUDA Graph / 前缀缓存 | 首次都关 | 都开（0.34 默认） | T4 先缩小排障范围；H20 先看主线默认，对照时再关 |
+| KV 显存上限 | `--gpu-memory-utilization 0.85` | 不传，交给 extensible KV cache | T4 先留余量排障；H20 看 0.34 的默认，`MEM_UTIL=0.90` 是对照组 |
 | 思考模式 | 客户端请求关闭 | 同左 | 先看可见答案，再单独测 thinking |
 
 **T4：9B W4A16 的权重账。** W4A16 不意味着所有参数恰好 4bit。这份 checkpoint 的量化 `ignore` 包含 GDN 部分线性层、Embedding、LM Head 和视觉模块等，仅用 `9B × 0.5 字节` 会低估权重。按固定 revision 各分片 safetensors 头逐个求和（只读文件头，不是 GPU 实测）：
@@ -51,7 +69,7 @@
 | **语言模型合计** | **10.04 GB（9.35 GiB）** | |
 | 视觉塔 / MTP | 0.91 / 0.49 GB | `--language-model-only` 不加载视觉塔 |
 
-`--gpu-memory-utilization 0.85` 在约 15 GiB 可见容量上的预算是 12.75 GiB，扣掉 9.35 GiB 权重，留给 KV、GDN 状态、激活与工作区的只有约 3.4 GiB。这是起步上下文和并发都设得很保守的原因。
+`--gpu-memory-utilization 0.85` 在约 15 GiB 可见容量上的预算是 12.75 GiB，扣掉 9.35 GiB 权重，留给 KV、GDN 状态、激活与工作区的只有约 3.4 GiB。这是起步上下文和并发都设得很保守的原因。0.34 的 KV 池是在 warmup 之后按实测剩余显存提交的，vLLM 自己的激活和 CUDA Graph 已经算进去，所以这个 0.85 主要是给排障留的余量：启动时会有一条 WARNING `gpu_memory_utilization=0.85 caps this instance at … GiB, keeping … GiB of free device memory out of the KV cache`，这在 T4 首次启动时是预期内的。跑通之后想把这部分也给 KV，用 `MEM_UTIL=auto`（不传这个参数），把两次的 `GPU KV cache size` 记下来比较。
 
 **H20：27B 的权重账。** 同样按固定 revision 的文件头求和：
 
@@ -64,9 +82,9 @@
 | **语言模型合计** | **29.47 GB（27.44 GiB）** | **53.79 GB（50.10 GiB）** |
 | 视觉塔 / MTP | 0.92 / 0.48 GB | 0.92 / 0.85 GB |
 
-按约 96 GiB 可见容量（以你的 `nvidia-smi` 为准）、`MEM_UTIL=0.90` 算，预算约 86 GiB：FP8 扣掉权重剩约 59 GiB，BF16 剩约 36 GiB，给 KV、GDN 状态、激活、CUDA Graph。账要分两种：全注意力 KV 每 token 64 KiB（16 层 × 4 KiB，BF16），GDN 状态每条序列 146.8 MiB（48 层，递推部分按 config 存 FP32），一条序列在约 2350 token 以内时 GDN 状态比 KV 还大。9B 对应的数是 32 KiB / token、49.1 MiB / 序列、约 1570 token。池子实际多大，看启动日志的 `GPU KV cache size: … tokens, Maximum concurrency for … tokens per request: …x`。
+按约 96 GiB 可见容量（以你的 `nvidia-smi` 为准），FP8 扣掉权重剩约 68 GiB，BF16 剩约 46 GiB，给 KV、GDN 状态、激活、CUDA Graph。0.34 的 H20 脚本不传 `--gpu-memory-utilization`：extensible KV cache 先预留地址，warmup 和 CUDA Graph 捕获之后，把实测剩下的显存提交给 KV 池，日志里有一行 `Memory after warmup: … GiB free, … GiB committed to the KV cache, …`。上一版按 `MEM_UTIL=0.90` 预留约 86 GiB（FP8 剩约 59 GiB），现在作为对照组保留。同一张卡上还有别的进程时，仍要显式设 `MEM_UTIL`，vLLM 量不到它们。账要分两种：全注意力 KV 每 token 64 KiB（16 层 × 4 KiB，BF16），GDN 状态每条序列 146.8 MiB（48 层，递推部分按 config 存 FP32），一条序列在约 2350 token 以内时 GDN 状态比 KV 还大。9B 对应的数是 32 KiB / token、49.1 MiB / 序列、约 1570 token。池子实际多大，看启动日志的 `GPU KV cache size: … tokens, Maximum concurrency for … tokens per request: …x`。
 
-**三个检查分别完成：** 权重能放下；量化内核支持这块 GPU；GDN 与普通注意力内核支持当前 dtype 和 GPU。T4 上 0.32 的 W4A16 按顺序试内核，SM90 起步的 Cutlass W4A8、Machete 会跳过，Marlin 从 SM75 起；启动日志 `Using …LinearKernel for mixed-precision linear` 写的是实际选中的那个，抄下来。普通注意力后端开关不会修复 GDN 的内核问题；FP16 下出现 NaN 或异常输出，也不能当成正常质量。H20 上 FP8 块量化 GEMM 是 SM90 的原生路径，主要风险在驱动和 CUDA 版本（第 2 节）。
+**三个检查分别完成：** 权重能放下；量化内核支持这块 GPU；GDN 与普通注意力内核支持当前 dtype 和 GPU。T4 上 0.34 的 W4A16 按顺序试内核（顺序与 0.32 相同），SM90 起步的 Cutlass W4A8、Machete 会跳过，Marlin 从 SM75 起；启动日志 `Using …LinearKernel for mixed-precision linear` 写的是实际选中的那个，抄下来。普通注意力后端开关不会修复 GDN 的内核问题；FP16 下出现 NaN 或异常输出，也不能当成正常质量。H20 上 FP8 块量化 GEMM 是 SM90 的原生路径，主要风险在驱动和 CUDA 版本（第 2 节）。
 
 **大 MoE 不在这两张卡上。** DeepSeek-V4.1-Flash 按 [HF 页面](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)的 safetensors 统计约 765 GB，单张 96 GB 的 H20 放不下；它的生产引擎 [DeepInfer](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/README.md) 只支持 NVIDIA SM100 和华为昇腾 950，回归测试 4 张卡起步。H20 主机有 192 核、2.2 TiB 内存，以后学 Engram 的 CPU offload 有条件，但前提是先有多卡（TP/EP），那是本指南之后的一步。这里只在讲原理时引用 DeepInfer 和配套的 deepseek-recipe。
 
@@ -81,17 +99,19 @@ docker --version   # 在 K8s Pod 里通常没有，见本节后半
 
 记录 GPU 名、驱动版本、总显存、其他进程占用。T4 的「16GB」是产品标称，`nvidia-smi` 可见容量常约 15360 MiB。输出顶部的 CUDA Version 是驱动支持的最高 CUDA 版本，不等于镜像里 PyTorch 的 CUDA 构建版本。
 
-**驱动决定用哪个 CUDA 构建。** 0.32.0 的默认镜像 `vllm/vllm-openai:v0.32.0` 和 PyPI wheel 都按 CUDA 13.0 构建，正常需要 R580 以上的驱动；官方另发了 CUDA 12.9 的 `v0.32.0-cu129` 镜像和 wheel，这是本手册 0.32.0 的备选构建。0.33.0 起 vLLM 只发 CUDA 13.0 的 wheel 和镜像，不再发布 `-cu129`（[#62575](https://github.com/vllm-project/vllm/pull/62575)），所以别指望更新的版本也有 cu129 这条退路。
+**驱动决定用哪个 CUDA 构建。** 0.34.0 的镜像 `vllm/vllm-openai:v0.34.0` 和 PyPI wheel 只有 CUDA 13.0 构建，正常需要 R580 以上的驱动。从 0.33.0 起 vLLM 不再发布 CUDA 12.9 的 wheel 和 `-cu129` 镜像（[#62575](https://github.com/vllm-project/vllm/pull/62575)）；它依赖的 torch 2.14.0 也没有 cu129 版（只有 cu126 / cu130 / cu132）。注意 0.34.0 的[安装文档](https://github.com/vllm-project/vllm/blob/v0.34.0/docs/getting_started/installation/gpu.cuda.inc.md)开头几处仍写着「CUDA 12.9 构建」，和 Release 说明、PyPI、Docker Hub 都对不上，以后三者为准。CMake 仍接受 CUDA 12.x 做源码构建，但这不是官方发布或 CI 覆盖的组合，本手册不提供这条路：**cu129 只存在于 0.32.0，不能拿「自己从源码编」当成它在 0.34 上的替代品。**
+
+T4 和 SM75 仍在 0.34 的支持范围里：安装文档列的算力是 7.5 及以上，wheel 和镜像的 `TORCH_CUDA_ARCH_LIST` / CMake 架构列表都含 7.5 和 9.0。
 
 | 驱动 | 做法 | 说明 |
 | --- | --- | --- |
 | R580 及以上 | 直接用默认镜像 | |
-| R535、R570（T4、H20 都是数据中心卡） | 加 `CUDA_COMPAT=1` | 前向兼容：容器里自带 CUDA 13.0 的 compat 用户态驱动，NVIDIA 的兼容矩阵列出 `cuda-compat-13-0` 支持 535、570 分支。PTX JIT 照常可用。SGLang 0.5.23 只有 CUDA 13 镜像，两边对照也是这条路 |
-| 其他旧分支（如 R550，已不在兼容矩阵里），或兼容模式报 803/804 | `VLLM_IMAGE=vllm/vllm-openai:v0.32.0-cu129`，或升级驱动 | CUDA 12.x 小版本兼容只覆盖预编译的 SASS，不能 JIT 更新的 PTX。部分内核（例如 Marlin 的权重重排）在 SM90 上只带 PTX，要驱动现编，旧驱动会报 `the provided PTX was compiled with an unsupported toolchain` |
+| R535、R570（T4、H20 都是数据中心卡） | 加 `CUDA_COMPAT=1` | 前向兼容：容器里自带 CUDA 13.0 的 compat 用户态驱动，NVIDIA 的兼容矩阵列出 `cuda-compat-13-0` 支持 535、570 分支，文档的示例本身就用 Tesla T4。PTX JIT 照常可用。SGLang 0.5.23 只有 CUDA 13 镜像，两边对照也是这条路 |
+| 其他旧分支（如 R550，已不在兼容矩阵里），或兼容模式报 803/804 | 升级驱动到 R580+；不能升级时整体回退到 `VLLM_VERSION=0.32.0`（镜像 `v0.32.0-cu129`） | 回退是换了一个更旧的引擎，不只是换 CUDA：块大小回到 528 / 784 / 1568，KV 按 0.92 预留，第 6 节的数字要看[上一版手册](https://github.com/evenchen6/vllm-sglang-handbook/tree/afbaa89/docs/t4-qwen35-lab.md)。另外 CUDA 12.x 小版本兼容只覆盖预编译的 SASS，不能 JIT 更新的 PTX；部分内核（例如 Marlin 的权重重排）在 SM90 上只带 PTX，旧驱动会报 `the provided PTX was compiled with an unsupported toolchain` |
 
-H20 现在是 535.247.01，按第二行走。T4 的驱动按你的读数选。两台机器尽量用同一个 CUDA 构建（都 CUDA 13 或都 cu129），否则对照时要把它记成一个变量。
+T4（535.161.07）和 H20（535.247.01）都在 535 分支，按第二行走，和上一版手册钉 0.32.0 时的默认路径相同（0.32.0 的默认镜像同样是 CUDA 13）。变的只是第三行：0.34 没有 cu129，兼容模式不行时只剩升级驱动或回退版本。两台机器尽量用同一个版本和 CUDA 构建，否则对照时要把它记成一个变量。
 
-`CUDA_COMPAT=1` 做两件事：设 `VLLM_ENABLE_CUDA_COMPATIBILITY=1`（vLLM 文档的开关），并在**进程启动之前**把 `/usr/local/cuda/compat`（官方镜像自带）放到 `LD_LIBRARY_PATH` 最前（NVIDIA 前向兼容文档的做法）。只设前者不够：vLLM 在 Python 里改 `LD_LIBRARY_PATH`，而 glibc 只在进程启动时读这个变量，0.32 的 EngineCore 和 worker 默认是 fork 出来的，也读不到。本项目在本机用 `ctypes` 加载测试库复现了这一点，但没有在 535 驱动的 GPU 上验证整条链路。前向兼容只适用于数据中心和专业卡，消费级卡加载 compat 库会报错 803。
+`CUDA_COMPAT=1` 做两件事：设 `VLLM_ENABLE_CUDA_COMPATIBILITY=1`（vLLM 文档的开关），并在**进程启动之前**把 `/usr/local/cuda/compat`（官方镜像自带）放到 `LD_LIBRARY_PATH` 最前（NVIDIA 前向兼容文档的做法）。只设前者不够：vLLM 在 Python 里改 `LD_LIBRARY_PATH`，而 glibc 只在进程启动时读这个变量，0.34 的 EngineCore 和 worker 默认仍是 fork 出来的，也读不到。本项目在本机用 `ctypes` 加载测试库复现了这一点，但没有在 535 驱动的 GPU 上验证整条链路。前向兼容只适用于数据中心和专业卡，消费级卡加载 compat 库会报错 803。
 
 用与服务相同的镜像验证 PyTorch，这里不加载模型。下面的检查片段同时打印实际加载的 `libcuda` 报告的 CUDA 版本：535 系统驱动是 12020，compat 生效后应是 13000。
 
@@ -104,40 +124,40 @@ print("GPU", torch.cuda.get_device_name(0), "capability", cap)
 x = torch.ones((32, 32), device="cuda", dtype=dtype); print("matmul", dtype, (x @ x).shape)'
 
 # 驱动 R580+：
-docker run --rm --gpus device=0 --entrypoint python3 vllm/vllm-openai:v0.32.0 -c "$CHECK"
+docker run --rm --gpus device=0 --entrypoint python3 vllm/vllm-openai:v0.34.0 -c "$CHECK"
 # 驱动 R535/R570（与 CUDA_COMPAT=1 相同的库路径）：
 docker run --rm --gpus device=0 --entrypoint python3 \
   -e LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64 \
-  vllm/vllm-openai:v0.32.0 -c "$CHECK"
+  vllm/vllm-openai:v0.34.0 -c "$CHECK"
 ```
 
-T4 应识别 capability `(7, 5)` 并完成 FP16 矩阵乘，H20 是 `(9, 0)` 和 BF16。这只证明基础 CUDA 路径可用，**不能证明量化与 GDN 内核可用**。这里失败先处理驱动、兼容库或容器运行时，不要改模型上下文去解决环境错误。镜像自带 CUDA/PyTorch 依赖，不要在里面随意升级单个包。
+T4 应识别 capability `(7, 5)` 并完成 FP16 矩阵乘，H20 是 `(9, 0)` 和 BF16；两边都应打印 `torch 2.14.0+cu130`。这只证明基础 CUDA 路径可用，**不能证明量化与 GDN 内核可用**，也不能证明 0.34 的 extensible KV cache 用到的 CUDA 虚拟内存接口在 compat 驱动下正常（没有在 535 上验证过，启动失败时把报错连同驱动版本记下来）。这里失败先处理驱动、兼容库或容器运行时，不要改模型上下文去解决环境错误。镜像自带 CUDA/PyTorch 依赖，不要在里面随意升级单个包。
 
 记录实际镜像 digest（标签可能被重新发布）：
 
 ```bash
-docker image inspect vllm/vllm-openai:v0.32.0 --format '{{json .RepoDigests}}'
+docker image inspect vllm/vllm-openai:v0.34.0 --format '{{json .RepoDigests}}'
 ```
 
-2026-10-30 在 Docker Hub 上查到的 manifest list digest：`v0.32.0` 是 `sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34`，`v0.32.0-cu129` 是 `sha256:bc0445dac61accbf1c3b17fbb524a71eee0b1b32f55ba45952095e3be8991c3f`。
+2026-11-18 在 Docker Hub 上查到的 manifest list digest：`v0.34.0` 是 `sha256:20fdb089454afbb324efa4110a2c025ff7b27cc1a086e07aa580b18df8ad1ce1`。回退用的 `v0.32.0-cu129` 是 `sha256:bc0445dac61accbf1c3b17fbb524a71eee0b1b32f55ba45952095e3be8991c3f`（2026-10-30 查到）。
 
-**已经在 GPU Pod 里、没有 Docker。** K8s Pod 里一般跑不了 Docker（嵌套容器要特权模式），不必硬装。启动脚本的 `RUNTIME=native` 把同一组引擎参数交给本机的 vLLM 进程（第 3 节）。vLLM 0.32.0 从哪来，按推荐顺序：
+**已经在 GPU Pod 里、没有 Docker。** K8s Pod 里一般跑不了 Docker（嵌套容器要特权模式），不必硬装。启动脚本的 `RUNTIME=native` 把同一组引擎参数交给本机的 vLLM 进程（第 3 节）。vLLM 0.34.0 从哪来，按推荐顺序：
 
-- **Pod 能换镜像（推荐，T4 和 H20 都适用）：** 把 Pod 镜像设成 `vllm/vllm-openai:v0.32.0`（按上表也可能是 `-cu129`），`command` 改成 `sleep infinity` 再进去操作（镜像默认入口是 `vllm serve`）。镜像里的 `python3` 已装好 vLLM 0.32.0，依赖和 Docker 路径相同；`/usr/local/cuda/compat` 也在，`CUDA_COMPAT=1` 直接可用。digest 用 `kubectl get pod YOUR_POD -o jsonpath='{.status.containerStatuses[0].imageID}'` 查。上面的检查改成在 Pod 里执行 `python3 -c "$CHECK"`，驱动 R535/R570 时前面加 `LD_LIBRARY_PATH=/usr/local/cuda/compat:$LD_LIBRARY_PATH`。
-- **只能用现有系统：** 自建 venv。0.32.0 要 Python 3.11–3.14（系统自带的 3.9 不行，用 uv 下载托管的 3.12），x86_64 wheel 是 `manylinux_2_28`。但依赖 `llguidance` 1.7.x 给 CPython 的 x86_64 wheel 只有 `manylinux_2_31`，glibc 低于 2.31 的系统（el8 系，例如 TencentOS 3.2，是 2.28）会转去编译它的 Rust 源码包，没有 Rust 工具链就失败。这是 2026-10-30 用 uv 按 `manylinux_2_28` 平台解析出来的结论，198 个依赖里只有它没有现成 wheel。el8 上请回到上一条。
+- **Pod 能换镜像（推荐，T4 和 H20 都适用）：** 把 Pod 镜像设成 `vllm/vllm-openai:v0.34.0`（回退时是 `v0.32.0-cu129`，脚本再加 `VLLM_VERSION=0.32.0`），`command` 改成 `sleep infinity` 再进去操作（镜像默认入口是 `vllm serve`）。镜像里的 `python3` 已装好 vLLM 0.34.0，依赖和 Docker 路径相同；`/usr/local/cuda/compat` 也在，`CUDA_COMPAT=1` 直接可用。digest 用 `kubectl get pod YOUR_POD -o jsonpath='{.status.containerStatuses[0].imageID}'` 查。上面的检查改成在 Pod 里执行 `python3 -c "$CHECK"`，驱动 R535/R570 时前面加 `LD_LIBRARY_PATH=/usr/local/cuda/compat:$LD_LIBRARY_PATH`。
+- **只能用现有系统：** 自建 venv。0.34.0 要 Python 3.11–3.14（系统自带的 3.9 不行，用 uv 下载托管的 3.12），x86_64 wheel 是 `manylinux_2_28`。但依赖 `llguidance` 1.7.x 给 CPython 的 x86_64 wheel 只有 `manylinux_2_31`，glibc 低于 2.31 的系统（el8 系，例如 TencentOS 3.2，是 2.28）会转去编译它的 Rust 源码包，没有 Rust 工具链就失败。这是 2026-11-18 用 uv 按 `manylinux_2_28` 平台解析 0.34.0 的结论，199 个依赖里只有它没有现成 wheel（0.32.0 时也一样）。el8 上请回到上一条。
 
 glibc ≥ 2.31 的机器上，venv 和权重缓存放在空间够的数据盘上，例如 `/data/vllm-lab`：
 
 ```bash
 uv venv /data/vllm-lab/.venv --python 3.12 --seed --managed-python
 source /data/vllm-lab/.venv/bin/activate
-uv pip install 'vllm==0.32.0' --torch-backend=cu130          # CUDA 13 构建，与默认镜像一致
-# 或 CUDA 12.9 构建（与 -cu129 镜像一致）：
+uv pip install 'vllm==0.34.0' --torch-backend=cu130   # 写死 cu130：auto 在 R535 上可能挑 CUDA 12 的 torch
+# 回退到 0.32.0 的 CUDA 12.9 构建（与 v0.32.0-cu129 镜像一致；另建 venv，脚本加 VLLM_VERSION=0.32.0）：
 # uv pip install 'https://github.com/vllm-project/vllm/releases/download/v0.32.0/vllm-0.32.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl' --torch-backend=cu129
 vllm download-kernels   # FlashInfer 预编译内核；不装会在 Hopper 上启动时现编几分钟
 ```
 
-两条安装命令都用 uv 按 `manylinux_2_31` 平台解析过，分别得到 `torch==2.13.0+cu130` 和 `torch==2.13.0+cu129`。venv 里要用前向兼容，得另装 `cuda-compat-13-0`（来自 NVIDIA 的 CUDA 软件源），再设 `CUDA_COMPAT_DIR=/usr/local/cuda-13.0/compat`。然后在这个环境里做同一项检查；依赖清单代替镜像 digest 进记录：
+两条安装命令都用 uv 按 `manylinux_2_31` 平台解析过，分别得到 `torch==2.14.0+cu130` 和 `torch==2.13.0+cu129`。`--torch-backend=auto` 按本机驱动挑 torch 的 CUDA 版本，R535 上可能挑到 cu126，和只有 CUDA 13 构建的 vLLM 0.34 对不上，所以这里写死。venv 里要用前向兼容，得另装 `cuda-compat-13-0`（来自 NVIDIA 的 CUDA 软件源），再设 `CUDA_COMPAT_DIR=/usr/local/cuda-13.0/compat`。然后在这个环境里做同一项检查；依赖清单代替镜像 digest 进记录：
 
 ```bash
 python3 -c "$CHECK"
@@ -158,14 +178,14 @@ CUDA_COMPAT=1 DRY_RUN=1 bash scripts/serve-vllm-h20.sh
 CUDA_COMPAT=1 bash scripts/serve-vllm-h20.sh
 ```
 
-已在 GPU Pod 里、没有 Docker，按第 2 节备好 vLLM 0.32.0 之后，在前面加 `RUNTIME=native`；venv 没激活时再加 `PYTHON=/data/vllm-lab/.venv/bin/python`：
+已在 GPU Pod 里、没有 Docker，按第 2 节备好 vLLM 0.34.0 之后，在前面加 `RUNTIME=native`；venv 没激活时再加 `PYTHON=/data/vllm-lab/.venv/bin/python`：
 
 ```bash
 RUNTIME=native bash scripts/serve-vllm-t4.sh
 CUDA_COMPAT=1 RUNTIME=native bash scripts/serve-vllm-h20.sh
 ```
 
-两种方式共用同一份引擎参数，只换拉起进程的那一层。镜像入口 `vllm serve` 换成 `python3 -m vllm.entrypoints.cli.main serve`，它就是 `vllm` 命令本身，只是固定用通过了版本检查的那个解释器。服务直接监听 `127.0.0.1:$PORT`。`GPU_DEVICE` 写进 `CUDA_VISIBLE_DEVICES`，`HF_CACHE_DIR` 写进 `HF_HOME`（目录结构与容器里的 `/root/.cache/huggingface` 相同）；这两个脚本变量没设时沿用环境里已有的值，都没有才用 0 和仓库的 `.cache/huggingface`。环境里的 vllm 不是 0.32.0 时，脚本直接退出并打印安装提示。不要改用 `python -m vllm.entrypoints.openai.api_server`：0.32 里它已标为弃用，而且仍然不读位置参数里的模型，会静默起默认的 `Qwen/Qwen3-0.6B`。
+两种方式共用同一份引擎参数，只换拉起进程的那一层。镜像入口 `vllm serve` 换成 `python3 -m vllm.entrypoints.cli.main serve`，它就是 `vllm` 命令本身，只是固定用通过了版本检查的那个解释器。服务直接监听 `127.0.0.1:$PORT`。`GPU_DEVICE` 写进 `CUDA_VISIBLE_DEVICES`，`HF_CACHE_DIR` 写进 `HF_HOME`（目录结构与容器里的 `/root/.cache/huggingface` 相同）；这两个脚本变量没设时沿用环境里已有的值，都没有才用 0 和仓库的 `.cache/huggingface`。环境里的 vllm 不是 0.34.0 时，脚本直接退出并打印安装提示；回退时设 `VLLM_VERSION=0.32.0`，脚本就改查 0.32.0，Docker 方式默认改用 `v0.32.0-cu129` 镜像。不要改用 `python -m vllm.entrypoints.openai.api_server`：0.34 里它仍标为弃用，而且仍然不读位置参数里的模型，会静默起默认的 `Qwen/Qwen3-0.6B`。
 
 后面各节的启动命令，原生方式都在前面加 `RUNTIME=native`（或先 `export RUNTIME=native`），H20 再加 `CUDA_COMPAT=1`，其余变量含义不变。
 
@@ -185,17 +205,19 @@ python3 examples/stream-bench.py --model qwen3.8-27b-fp8 --requests 1 --warmup 0
 
 `/v1/models` 返回后再发请求；下载、编译与首次初始化不能混入稳态测试。记下从服务启动（容器或本机进程）到 `/v1/models` 成功的墙钟时间：这是读权重和初始化，请求的 TTFT 从这之后才开始算。服务别名不是权重仓库 ID：T4 默认 `qwen3.5-9b`，H20 默认 `qwen3.8-27b-fp8`，BF16 版 `qwen3.8-27b`。客户端只用 Python 标准库，Pod 里系统自带的 Python 3.9 就够。端口默认绑在本机回环地址；从个人电脑访问远端机器时建 SSH 隧道 `ssh -L 8000:127.0.0.1:8000 YOUR_HOST`，K8s 里用 `kubectl port-forward pod/YOUR_POD 8000:8000`，并记录是否经过隧道。
 
-**启动日志里抄这几行**（引号里是 0.32 源码的日志原文，`N`、`…` 处是你的值）：
+**启动日志里抄这几行**（引号里是 0.34 源码的日志原文，`N`、`…` 处是你的值）：
 
 - `Using … attention backend out of potential backends: …`：实际选中的普通注意力后端。T4 预期 `TRITON_ATTN`，H20 预期 `FLASH_ATTN`。
 - `Setting attention block size to N tokens to ensure that attention page size is >= mamba page size.`：混合模型的块大小，第 6 节要用。
+- `Using … GDN prefill kernel (requested=…, head_k_dim=…)`：GDN 的 prefill 内核。按 0.34 的选择逻辑，T4 预期 `Triton/FLA`，H20 预期 `FlashInfer`；H20 还会有一条 WARNING 说 FlashInfer 的 GDN prefill 要 JIT 编译、首次启动会慢，这段时间算进就绪时间。第 6 节的 `align` 存法取决于这一行。
 - `GPU KV cache size: … tokens, Maximum concurrency for … tokens per request: …x`：KV 池能装多少、按 `MAX_LEN` 算能并发几条。
+- `Memory after warmup: … GiB free, … GiB committed to the KV cache, …`：extensible KV cache 在 warmup 之后实际提交了多少。T4 还会有上面说的 `gpu_memory_utilization=0.85 caps this instance …` WARNING。
 - `Model loading took … GiB memory and … seconds`；T4 还有 `Using …LinearKernel for mixed-precision linear`。
 - `non-default args: {…}`：脚本显式传了哪些参数。
 
-0.18.1 的 `Asynchronous scheduling is enabled.` 这一行在 0.32 已经没有了。按 0.32 的[配置源码](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/config/vllm.py)，不传 `--async-scheduling` 时自动开启，只有池化模型、不兼容的推测解码方式或不支持的执行器才关；单卡、不开推测解码的这两套配置预期是开启。想在日志里留下证据，就显式传 `ASYNC_SCHED=1` 或 `0`，`non-default args` 里会出现 `async_scheduling`。为什么值得看，见第 5 节。
+0.18.1 的 `Asynchronous scheduling is enabled.` 这一行从 0.32 起就没有了。按 0.34 的[配置源码](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/config/vllm.py)，不传 `--async-scheduling` 时自动开启，只有池化模型、不支持的执行器（以及 ROCm 上的一种 DeepEP 组合）才关，推测解码不再是关闭条件；单卡、不开推测解码的这两套配置预期是开启。想在日志里留下证据，就显式传 `ASYNC_SCHED=1` 或 `0`，`non-default args` 里会出现 `async_scheduling`。为什么值得看，见第 5 节。
 
-检查答案是否完整、是否重复或乱码、`finish_reason` 是否为 `length`。256 输出 token 是冒烟长度，可提高 `--max-tokens`。0.32 起 `max_tokens` 只是输出上限，不再从上下文里预留：输入加 `max_tokens` 超过 `MAX_LEN` 不会被拒，输出写满上下文就以 `length` 结束；只有输入本身超过 `MAX_LEN` 才报错。
+检查答案是否完整、是否重复或乱码、`finish_reason` 是否为 `length`。256 输出 token 是冒烟长度，可提高 `--max-tokens`。0.32 起（0.34 照旧）`max_tokens` 只是输出上限，不再从上下文里预留：输入加 `max_tokens` 超过 `MAX_LEN` 不会被拒，输出写满上下文就以 `length` 结束；只有输入本身超过 `MAX_LEN` 才报错。
 
 ## 4. 认识脚本的测量口径
 
@@ -284,40 +306,45 @@ python3 -c 'import json,sys; print([r.get("cached_tokens") for r in json.load(op
 
 脚本把资料放在固定 system 消息里，只在 user 后缀改变编号。`--prefix-lines` 调整资料行数，不是精确 token 数。用两个模型的 tokenizer 和 chat template（关闭思考）实算过：默认 32 行时整个输入 988 token，两条请求的公共前缀 966 token；64 行是 1916 / 1894。不能把随机编号放在 system 最前面，再期待后面相同片段仍命中。
 
-**先查块大小 N。** vLLM 的 KV 池只有一种页大小，混合模型的一页要同时放下 N 个 token 的全注意力 KV 和一层 GDN 的状态（递推部分 FP32，不随 token 变小），所以块会被调大。0.32 的[对齐代码](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/platforms/interface.py)：N = 对齐 × ⌈每层状态字节 ÷ (对齐 × 每 token 每层 KV 字节)⌉，对齐取注意力内核支持的最小块，`TRITON_ATTN` 和 SM90 上的 `FLASH_ATTN` 都是 16。用 0.32 自己的 spec 类算出来：
+**先查块大小 N。** vLLM 的 KV 池只有一种页大小，混合模型的一页要同时放下 N 个 token 的全注意力 KV 和一层 GDN 的状态（递推部分 FP32，不随 token 变小），所以块会被调大。0.34 的[对齐代码](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/platforms/interface.py)：N = 对齐 × ⌈每层状态字节 ÷ (对齐 × 每 token 每层 KV 字节)⌉。对齐取「注意力内核支持的最小块」和「当前 `block_size`」中较大的那个；0.34 的默认 `block_size` 是 64（`TRITON_ATTN` 和 SM90 上的 `FLASH_ATTN` 最小块都是 16），所以对齐是 64。H20 开前缀缓存时，FlashInfer 的 GDN 检查点还要求块是 64 的倍数，结果一样。用 0.34 自己的 spec 类和对齐函数算出来（0.32 的值放在后面对照）：
 
-| 配置 | 每层 GDN 状态 | 每 token 每层 KV | 预期 N |
-| --- | --- | --- | --- |
-| T4，9B，FP16 KV | 2.05 MiB | 4 KiB | 528 |
-| H20，27B，BF16 KV | 3.06 MiB | 4 KiB | 784 |
-| H20，27B，`KV_DTYPE=fp8` | 3.06 MiB | 2 KiB | 1568 |
+| 配置 | 每层 GDN 状态 | 每 token 每层 KV | 预期 N（0.34） | 0.32 |
+| --- | --- | --- | --- | --- |
+| T4，9B，FP16 KV | 2.05 MiB | 4 KiB | 576 | 528 |
+| H20，27B，BF16 KV | 3.06 MiB | 4 KiB | 832 | 784 |
+| H20，27B，`KV_DTYPE=fp8` | 3.06 MiB | 2 KiB | 1600 | 1568 |
 
-FP8 KV 让每 token 的 KV 减半，GDN 状态不变，N 就翻倍，命中粒度也跟着变粗。这一步在 0.32 里对所有混合模型都做，和开不开前缀缓存无关，两组日志里的 N 应当相同。以日志的 `Setting attention block size to N tokens …` 为准。
+同一个公式，只是对齐从 16 变成 64，N 向上取到 64 的倍数。FP8 KV 让每 token 的 KV 减半，GDN 状态不变，N 就接近翻倍，命中粒度也跟着变粗。这一步对所有混合模型都做，这两套配置下和开不开前缀缓存无关，两组日志里的 N 应当相同。以日志的 `Setting attention block size to N tokens to ensure that attention page size is >= mamba page size.` 为准。
 
-**状态模式：0.32 只剩 `align` 和 `none`。** PREFIX_CACHE=1 时，启动日志有一行 INFO：`Mamba cache mode is set to 'align' for Qwen3_5ForConditionalGeneration by default when prefix caching is enabled`。这句原文是在无 GPU 机器上跑 0.32.0 的配置代码得到的，9B W4A16、27B FP8、27B BF16 三份 checkpoint 都一样。PREFIX_CACHE=0 时模式保持 `none`，不打印这一行，GDN 状态不为复用保存。0.18.1 里给部分模型用的 `all` 已删除，手动传 `--mamba-cache-mode all` 会在参数解析时报 `invalid choice: 'all' (choose from 'align', 'none')`。脚本不传这个参数。
+**状态模式：仍然只有 `align` 和 `none`。** PREFIX_CACHE=1 时，启动日志有一行 INFO：`Mamba cache mode is set to 'align' for Qwen3_5ForConditionalGeneration by default when prefix caching is enabled`。这句原文是在无 GPU 机器上跑 0.34.0 的配置代码得到的，9B W4A16、27B FP8、27B BF16 三份 checkpoint 都一样。PREFIX_CACHE=0 时模式保持 `none`，不打印这一行，GDN 状态不为复用保存。0.34 里 `--mamba-cache-mode` 已标为弃用、传了也不起作用（模式只由前缀缓存决定）；`all` 从 0.32 起就删了，传 `--mamba-cache-mode all` 仍会在参数解析时报 `invalid choice: 'all' (choose from 'align', 'none')`。脚本不传这个参数。
 
-**`align` 把 GDN 状态存在哪。** 按 0.32 的[调度器](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/core/sched/scheduler.py)和 [cache 配置](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/config/cache.py)：状态在调度步结束时写，所以 prefill 的分块要停在块边界上；每条 prompt 会在最后一个整块边界 ⌊(L−1)/N⌋·N 处停一下，保留那里的状态（至少留 1 个 token 重算）。如果后来的请求在全注意力 KV 上命中得比 GDN 状态更长，调度器还会在这个「共享前缀交汇点」停一步补存状态（Marconi 式），下一条请求就能整段命中。默认只保留这些点上的检查点（`prefix_cache_retention_interval=0`）。命中要全部状态在同一条边界上都拿得回来，所以命中长度是 N 的整数倍。
+**`align` 把 GDN 状态存在哪。** 按 0.34 的[调度器](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/v1/core/sched/scheduler.py)和 [cache 配置](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/config/cache.py)：每条 prompt 在最后一个整块边界 ⌊(L−1)/N⌋·N 处留一份状态（至少留 1 个 token 重算）。怎么拿到这份状态，两张卡在 0.34 里不一样：
 
-**据此对默认 32 行的预期**（源码推断，不是实测）：预热那条不命中，它在最后整块边界留下状态，T4 上是 528、H20 上是 784，都落在 966 的公共前缀里。预热不进 `results`，所以结果里 12 条的 `cached_tokens` 都应当是 528（H20 是 784）。`KV_DTYPE=fp8` 时 N = 1568 比整个输入还长，32 行一个块都凑不满，改用 `--prefix-lines 64`，预期命中 1568。若你改了提示词，让最后整块边界落到各请求不同的后缀里，就要等交汇点补存之后才命中，结果里第一条会是 0。PREFIX_CACHE=0 那组应全为 0。
+- **T4（Triton/FLA 的 GDN prefill）**：和 0.32 相同。状态只在调度步结束时写，所以 prefill 的分块要停在那条边界上，一条 prompt 的 prefill 被拆成两步前向。
+- **H20（FlashInfer 的 GDN prefill）**：0.33 起 FlashInfer 内核在一次前向里顺带输出边界上的状态（[#60050](https://github.com/vllm-project/vllm/pull/60050)），调度器不再为它拆步。加 `--gdn-prefill-backend triton` 就退回 T4 那种拆法，可以拿来做单变量对照（第 7 节）。
 
-两组都做完后，对着 [0.32 的 APC 说明](https://docs.vllm.ai/en/v0.32.0/features/automatic_prefix_caching/)填实验记录：
+两种存法的命中位置相同。如果后来的请求在全注意力 KV 上命中得比 GDN 状态更长，调度器还会在这个「共享前缀交汇点」停一步补存状态（Marconi 式），下一条请求就能整段命中。默认只保留这些点上的检查点（`prefix_cache_retention_interval=0`）。命中要全部状态在同一条边界上都拿得回来，所以命中长度是 N 的整数倍。
 
-- 日志里的块大小 N、Mamba 模式那一行原文（或「没有这一行」）。
-- 每条请求的 `cached_tokens` 序列和 `cache_hit_requests`。和上面的预期对不上时，把序列原样记下：说明 0.32 的实际行为和这里的源码阅读不一致，以日志和计数为准。
+**据此对默认 32 行的预期**（源码推断，不是实测）：预热那条不命中，它在最后整块边界留下状态，T4 上是 576、H20 上是 832，都落在 966 的公共前缀里。预热不进 `results`，所以结果里 12 条的 `cached_tokens` 都应当是 576（H20 是 832）。`KV_DTYPE=fp8` 时 N = 1600 比整个输入还长，32 行一个块都凑不满，改用 `--prefix-lines 64`，预期命中 1600。若你改了提示词，让最后整块边界落到各请求不同的后缀里，就要等交汇点补存之后才命中，结果里第一条会是 0。PREFIX_CACHE=0 那组应全为 0。
+
+两组都做完后，对着 [0.34 的 APC 说明](https://docs.vllm.ai/en/v0.34.0/features/automatic_prefix_caching/)填实验记录：
+
+- 日志里的块大小 N、Mamba 模式那一行原文（或「没有这一行」）、GDN prefill 内核那一行。
+- 每条请求的 `cached_tokens` 序列和 `cache_hit_requests`。和上面的预期对不上时，把序列原样记下：说明 0.34 的实际行为和这里的源码阅读不一致，以日志和计数为准。
 - `/metrics` 里的 `vllm:prefix_cache_queries_total` 与 `vllm:prefix_cache_hits_total`（单位都是 token），命中率用这两个数算；服务日志也会周期性打印 `Prefix cache hit rate: …%`。
 - 激活 dtype、KV dtype、普通注意力后端。低精度 KV 压的是每 token 字节，不改变权重。
 
 APC/Radix 主要节省重复的 **prefill**；不会消除 decode 对历史上下文的读取。高并发同时发来的第一波请求可能都赶不上复用，先顺序验证命中，再增加并发。
 
-「命中长度 = 所有种类的状态都能在同一条边界拿回来的最长整块前缀」在别的混合结构里也成立。DeepSeek-V4.1-Flash 的全局 KV 按 128 token 一块存；滑动窗口（SWA）的状态不在最后那块里，就退一块，把最后 128 个 token 重新前向，近似补回（SWA Bounded Replay，0.32 的 DeepSeek-V4 实现里也有）。SWA 能这样补，是因为它每层只看最近一个窗口；GDN 的状态累积整段历史，只能存检查点。细节见[原理补充](generation-and-cache.md)。
+「命中长度 = 所有种类的状态都能在同一条边界拿回来的最长整块前缀」在别的混合结构里也成立。DeepSeek-V4.1-Flash 的全局 KV 按 128 token 一块存；滑动窗口（SWA）的状态不在最后那块里，就退一块，把最后 128 个 token 重新前向，近似补回（SWA Bounded Replay，0.34 的 DeepSeek-V4 实现里也有）。SWA 能这样补，是因为它每层只看最近一个窗口；GDN 的状态累积整段历史，只能存检查点。细节见[原理补充](generation-and-cache.md)。
 
-**进阶 / 多机，只读。** 这组对照里缓存只在一张卡的显存里，命中多长由一个调度器说了算。SGLang 的 HiCache 把复用延伸到主机内存和外部存储，并要在 CP、PP、推测解码、PD 分离下保持命中（[LMSYS 2026-11-02](https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving/)），多出来的问题都能用这一节的词说清：各 rank 必须对命中长度取同一个值；开推测解码时草稿模型的状态也要一起恢复；存储格式（模型、KV dtype、页大小、分区）不同就不能共享，和这里 `KV_DTYPE=fp8` 让 N 翻倍是同一类约束；PD 分离后 decode 侧命中的那段不用再从 prefill 传。机制和版本边界见[原理补充](generation-and-cache.md)。这些是 SGLang 的多机能力，单卡两条轨道都不做，也不是 vLLM 0.32 的行为。
+**进阶 / 多机，只读。** 这组对照里缓存只在一张卡的显存里，命中多长由一个调度器说了算。SGLang 的 HiCache 把复用延伸到主机内存和外部存储，并要在 CP、PP、推测解码、PD 分离下保持命中（[LMSYS 2026-11-02](https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving/)），多出来的问题都能用这一节的词说清：各 rank 必须对命中长度取同一个值；开推测解码时草稿模型的状态也要一起恢复；存储格式（模型、KV dtype、页大小、分区）不同就不能共享，和这里 `KV_DTYPE=fp8` 让 N 翻倍是同一类约束；PD 分离后 decode 侧命中的那段不用再从 prefill 传。机制和版本边界见[原理补充](generation-and-cache.md)。这些是 SGLang 的多机能力，单卡两条轨道都不做，也不是 vLLM 0.34 的行为。
 
 ## 7. 每次只增加一个变量
 
-**T4** 依次尝试：`MAX_LEN=8192`、`MAX_SEQS=2/4`、`EAGER=0` 开 CUDA Graph、调整 `BATCHED_TOKENS`、前缀缓存、思考模式、`ASYNC_SCHED=0` 关掉异步调度。不要一次全开。更大上下文既受 KV 容量也受实际输入/输出需求影响，模型卡的长上下文建议不作为这张卡的首次验收条件。
+**T4** 依次尝试：`MAX_LEN=8192`、`MAX_SEQS=2/4`、`EAGER=0` 开 CUDA Graph、`MEM_UTIL=auto` 把显存上限交给 extensible KV cache、调整 `BATCHED_TOKENS`、前缀缓存、思考模式、`ASYNC_SCHED=0` 关掉异步调度。不要一次全开。更大上下文既受 KV 容量也受实际输入/输出需求影响，模型卡的长上下文建议不作为这张卡的首次验收条件。
 
-**H20** 从主线默认出发，每次改一项：`KV_DTYPE=fp8`（KV 每 token 减半，N 变成约 1568，看 `GPU KV cache size` 和最大并发怎么变，同时验收质量）；`PROFILE=27b-bf16`（同一模型，权重字节翻倍，看 decode 间隔）；`PROFILE=9b-w4a16`（T4 的同一份 checkpoint，只换 GPU）；`ASYNC_SCHED=0`（c1 和 c16 都测，比 `estimated_tpot_ms`）；`EAGER=1`；`MAX_LEN=131072` 或 `262144`；`MAX_SEQS`、`BATCHED_TOKENS`。需要引擎参数而脚本没有开关的，直接写在命令后面，例如用模型自带的 MTP 头做推测解码（[vLLM recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-27B) 的写法）：
+**H20** 从主线默认出发，每次改一项：`KV_DTYPE=fp8`（KV 每 token 减半，N 变成 1600，看 `GPU KV cache size` 和最大并发怎么变，同时验收质量）；`MEM_UTIL=0.90`（extensible 仍开，只是把实例上限设回 90%，对比 `GPU KV cache size`）；在命令后面加 `--no-enable-extensible-kv-cache`（整段关掉 extensible KV cache，按 0.92 预留）。0.34 的 Release 说明写明这是个取舍：KV 池更大，但部分模型的 decode 会变慢（他们在 H200、并发 128 上测到 TPOT 增加 6–18%），所以这两组都要用 c1 / c16 / c64 的 `estimated_tpot_ms` 和吞吐一起比，不预设结论；加 `--gdn-prefill-backend triton`（退回拆步存状态，`cached_tokens` 应不变，比 shared-prefix 那组的 TTFT）；`PROFILE=27b-bf16`（同一模型，权重字节翻倍，看 decode 间隔）；`PROFILE=9b-w4a16`（T4 的同一份 checkpoint，只换 GPU）；`ASYNC_SCHED=0`（c1 和 c16 都测，比 `estimated_tpot_ms`）；`EAGER=1`；`MAX_LEN=131072` 或 `262144`；`MAX_SEQS`、`BATCHED_TOKENS`。需要引擎参数而脚本没有开关的，直接写在命令后面，例如用模型自带的 MTP 头做推测解码（[vLLM recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-27B) 的写法）：
 
 ```bash
 CUDA_COMPAT=1 bash scripts/serve-vllm-h20.sh --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
@@ -327,7 +354,7 @@ CUDA_COMPAT=1 bash scripts/serve-vllm-h20.sh --speculative-config '{"method":"mt
 
 调 `BATCHED_TOKENS` 时记住它是 token 预算，不是时间预算：同样 1024 个新 token，接在长前缀后面时注意力要和更长的历史算，这一块更贵。DeepSeek 的 prefill 调度给每一步定一个时间预算，用拟合的代价模型（新 token 数、已算前缀长度）反解这一块能切多大（[Q&A](https://github.com/deepseek-ai/DeepInfer/blob/8b16149741a4935e1dec8cea27853f273b374c5b/doc/DeepSeek%20V4.1%20Flash%20%E6%8E%A8%E7%90%86%E9%83%A8%E7%BD%B2%20Q%26A.pdf)）。比较 token 预算时，把输入长度一起记下。
 
-换镜像就是换环境：`VLLM_IMAGE` 换成 `-cu129`、或者从 Docker 换到原生，都要另存 digest（或 `pip freeze`）、`--help` 和全部结果，不和原来的数据混为一组。原生方式只认 vllm 0.32.0；想试别的版本就另建 venv，照 `DRY_RUN=1` 打印的参数手动起服务。换环境之后仍然记第 6 节那几项：块大小、状态模式、`cached_tokens`、queries/hits，外加就绪时间和同一条 shared-prefix 的 TTFT。
+换镜像就是换环境：回退到 `VLLM_VERSION=0.32.0`（`v0.32.0-cu129`）、或者从 Docker 换到原生，都要另存 digest（或 `pip freeze`）、`--help` 和全部结果，不和原来的数据混为一组。原生方式只认 vllm 0.34.0，或设了 `VLLM_VERSION=0.32.0` 时的 0.32.0；想试别的版本就另建 venv，照 `DRY_RUN=1` 打印的参数手动起服务。换环境之后仍然记第 6 节那几项：块大小、状态模式、`cached_tokens`、queries/hits，外加就绪时间和同一条 shared-prefix 的 TTFT。
 
 多卡是这之后的一步：Pod 能拿到多张 H20 时，再学张量并行（`--tensor-parallel-size`）、专家并行和 PD 分离，以及 DeepSeek-V4.1-Flash 这类大 MoE。现在的脚本固定 `--tensor-parallel-size 1`。
 
@@ -336,19 +363,22 @@ CUDA_COMPAT=1 bash scripts/serve-vllm-h20.sh --speculative-config '{"method":"mt
 | 阶段 / 现象 | 先看什么 | 下一步 |
 | --- | --- | --- |
 | 容器 / Pod 识别不到 GPU | 驱动、Container Toolkit 或 Pod 的 GPU 资源、第 2 节的检查 | 先修基础环境 |
-| `CUDA driver version is insufficient` / `The NVIDIA driver on your system is too old` | `nvidia-smi` 的驱动版本；检查片段里 `libcuda` 报的版本 | 驱动低于 R580：数据中心卡在 R535/R570 上加 `CUDA_COMPAT=1`，否则用 `-cu129` 镜像或升级驱动 |
-| 加了 `CUDA_COMPAT=1` 仍失败，或报 803 / 804 | GPU 是否数据中心卡、驱动分支是否在 NVIDIA 兼容矩阵里、`/usr/local/cuda/compat` 是否存在 | 改用 `-cu129` 镜像；原生 venv 要装 `cuda-compat-13-0` 并设 `CUDA_COMPAT_DIR` |
-| `the provided PTX was compiled with an unsupported toolchain` | 是否用了 `-cu129` 配旧驱动（小版本兼容不能 JIT 新 PTX） | 换回默认镜像加 `CUDA_COMPAT=1`，或升级驱动 |
-| 原生：pip/uv 找不到 0.32.0 | `python --version`（要 3.11–3.14） | 用 uv 托管的 Python 3.12，或改用镜像作 Pod 镜像 |
-| 原生：开始编译 llguidance、要求 Rust | `ldd --version`（低于 2.31，如 el8 的 2.28） | 用 `vllm/vllm-openai:v0.32.0` 作 Pod 镜像 |
+| `CUDA driver version is insufficient` / `The NVIDIA driver on your system is too old` | `nvidia-smi` 的驱动版本；检查片段里 `libcuda` 报的版本 | 驱动低于 R580：数据中心卡在 R535/R570 上加 `CUDA_COMPAT=1`，否则升级驱动，或整体回退 `VLLM_VERSION=0.32.0`（0.34 没有 cu129） |
+| 加了 `CUDA_COMPAT=1` 仍失败，或报 803 / 804 | GPU 是否数据中心卡、驱动分支是否在 NVIDIA 兼容矩阵里、`/usr/local/cuda/compat` 是否存在 | 原生 venv 要装 `cuda-compat-13-0` 并设 `CUDA_COMPAT_DIR`；仍不行就升级驱动，或整体回退 `VLLM_VERSION=0.32.0`（镜像 `v0.32.0-cu129`，第 6 节数字随之变回 0.32 的） |
+| `the provided PTX was compiled with an unsupported toolchain` | 是否在用 0.32.0 的 `-cu129` 回退配旧驱动（小版本兼容不能 JIT 新 PTX） | 换回 0.34 默认镜像加 `CUDA_COMPAT=1`，或升级驱动 |
+| 原生：pip/uv 找不到 0.34.0 | `python --version`（要 3.11–3.14） | 用 uv 托管的 Python 3.12，或改用镜像作 Pod 镜像 |
+| 原生：开始编译 llguidance、要求 Rust | `ldd --version`（低于 2.31，如 el8 的 2.28） | 用 `vllm/vllm-openai:v0.34.0` 作 Pod 镜像 |
+| 原生：装好后 `import vllm` 或启动时报 CUDA / 动态库加载错误 | `python3 -c 'import torch; print(torch.__version__)'` 是否 `+cu130` | 用 `--torch-backend=cu130` 重装；`auto` 可能按 R535 挑了 cu126 |
 | 原生：进程直接被杀，没有 Python 报错 | Pod 的内存 limit，`dmesg` 或 `kubectl describe pod` 里的 OOM 记录 | 调大 Pod 内存；这是主机内存，与显存 OOM 分开处理 |
 | 下载失败 / 磁盘不足 | 网络、缓存盘容量、模型 revision | 处理下载；不改变模型参数掩盖问题 |
 | 加载权重 OOM | 实际 GPU 空闲容量、其他进程、未量化模块 | 清理本次实验资源；T4 可选同代 4B；缩 KV 窗口不保证解决权重 OOM |
-| `no kernel image` / unsupported capability | SM75/SM90、量化内核、GDN / 普通注意力的具体栈 | 查 0.32 的支持情况；降低上下文通常无效 |
+| `no kernel image` / unsupported capability | SM75/SM90、量化内核、GDN / 普通注意力的具体栈 | 查 0.34 的支持情况；降低上下文通常无效 |
 | T4：BF16 不支持 | 命令是否带 `--dtype half`、日志里的 dtype | 检查未量化路径，不把 W4 等同 FP16 |
 | GDN / Triton 编译失败或长时间无输出 | 具体 kernel、dtype、是否仍在编译 | 保存日志与版本；不要把普通注意力开关当成 GDN 开关 |
 | KV 校验 / profiling / Graph OOM | 输入上限、调度序列数、Graph、池分配 | T4 从 2048、1 条、`EAGER=1` 起步；H20 先降 `MAX_SEQS` 或 `MAX_LEN`；逐项复测 |
-| `invalid choice: 'all'` | 是否手动传了 `--mamba-cache-mode all` | 0.32 已删除 `all`，去掉这个参数 |
+| `invalid choice: 'all'` | 是否手动传了 `--mamba-cache-mode all` | `all` 从 0.32 起就删了，0.34 里这个参数本身也已无效，去掉它 |
+| `VLLM_USE_V2_MODEL_RUNNER=0 is no longer supported` | 环境或 Pod 定义里残留的这个变量 | 删掉它；0.34 只有 Model Runner V2 |
+| `gpu_memory_utilization=… caps this instance …` WARNING | 是否显式设了 `MEM_UTIL` | T4 的 0.85 是有意留的余量；不需要时用 `MEM_UTIL=auto` |
 | NaN、重复、乱码 | 数值、量化兼容、模板、`finish_reason` | 先确认正确性，再测速度 |
 | reasoning 很长、答案为空 | thinking、`max_tokens`、上下文、reasoning/content 字段 | 先关 thinking 打通；再扩大输出预算并检查截断 |
 | prefix 无收益 | 日志里的 N 和模式行、`cached_tokens`、共享段是否长于 N | 记录为未成立的实验条件 |
@@ -364,21 +394,21 @@ python3 examples/stream-bench.py --model qwen3.5-4b --requests 1 --warmup 0 --sh
 
 ## 9. 可选的逐次前向观测
 
-这是 **Qwen3.5-4B FP16** 的独立五步实验，两台机器都能跑；先停止服务。使用 full multimodal class 的文本输入路径，不把 9B compressed checkpoint 当成普通全精度 HF 权重直接加载。脚本要 transformers ≥ 5.2（`Qwen3_5ForConditionalGeneration` 从这一版起才有）；0.18.1 要求 transformers < 5，在它的镜像里会 ImportError，0.32 的镜像带 5.16–5.19，可以直接用。
+这是 **Qwen3.5-4B FP16** 的独立五步实验，两台机器都能跑；先停止服务。使用 full multimodal class 的文本输入路径，不把 9B compressed checkpoint 当成普通全精度 HF 权重直接加载。脚本要 transformers ≥ 5.2（`Qwen3_5ForConditionalGeneration` 从这一版起才有）；0.18.1 要求 transformers < 5，在它的镜像里会 ImportError；0.34 要求 transformers ≥ 5.16.1、< 5.23，镜像可以直接用。
 
 ```bash
 mkdir -p "$PWD/.cache/huggingface"
 docker run --rm --gpus device=0 --ipc=host \
   -v "$PWD:/work" -w /work \
   -v "$PWD/.cache/huggingface:/root/.cache/huggingface" \
-  --entrypoint python3 vllm/vllm-openai:v0.32.0 \
+  --entrypoint python3 vllm/vllm-openai:v0.34.0 \
   examples/trace-generation.py --steps 5
 # 驱动 R535/R570：在镜像名前加
 #   -e LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64
 # Pod 里（镜像即 vllm/vllm-openai）：python3 examples/trace-generation.py --steps 5
 ```
 
-transformers 5.x 的缓存里，全注意力层是 `DynamicLayer`（`keys` / `values` 随 token 增长），GDN 层是 `LinearAttentionLayer`（`conv_states` / `recurrent_states` 按状态序号存，形状不随 token 变）。脚本两种都打印；在 transformers 5.19 上用随机初始化的小模型验证过输出（不是 4B 的真实数）。注意 HF 的卷积状态保留整个卷积核宽度（4），vLLM 只存 3，两边的形状不必相同。
+transformers 5.x 的缓存里，全注意力层是 `DynamicLayer`（`keys` / `values` 随 token 增长），GDN 层是 `LinearAttentionLayer`（`conv_states` / `recurrent_states` 按状态序号存，形状不随 token 变）。脚本两种都打印；在 transformers 5.19 和 5.22 上用随机初始化的小模型验证过输出（不是 4B 的真实数）。注意 HF 的卷积状态保留整个卷积核宽度（4），vLLM 只存 3，两边的形状不必相同。
 
 第二次追加 `--no-cache`，观察每次输入长度。代码只打印实际 cache 对象公开的张量；没有公开形状不等于没有状态。HF 普通注意力 `eager` 也不保证 GDN 不使用额外内核（没装 flash-linear-attention 时会退回 PyTorch 参考实现，很慢）；这项同样未做真实 GPU 验证。不要用这个逐步打印实验比较引擎吞吐。
 
@@ -386,7 +416,7 @@ transformers 5.x 的缓存里，全注意力层是 `DynamicLayer`（`keys` / `va
 
 ## 10. 用 SGLang 0.5.23 做对照
 
-**版本事实（2026-10-30 核对，Release 页 2026-11-07 补核）。** SGLang 0.5.23 的 git tag（`297e54f`）和 PyPI wheel 于 2026-10-30 发布；GitHub 的 [Release 说明页](https://github.com/sgl-project/sglang/releases/tag/v0.5.23)晚几天，于 2026-11-02 22:14:10 UTC（上海时间 11-03 06:14）发布，现已可查。官方镜像 `lmsysorg/sglang:v0.5.23` 是 CUDA 13.0.3，入口是 NVIDIA 的 `nvidia_entrypoint.sh`，后面直接跟 `sglang serve …`。[安装文档](https://docs.sglang.io/docs/get-started/install)写明 SGLang 只支持 CUDA 13，`v0.5.19-cu129` 是最后一个 CUDA 12 镜像。wheel 要 Python ≥ 3.11、glibc ≥ 2.34（`manylinux_2_34`），el8 装不上，Pod 里同样用镜像。依赖 torch 2.14.1、transformers 5.19.0，和 vLLM 0.32 的 torch 2.13.0 不同，**两个引擎不要装进同一个环境**。
+**版本事实（2026-10-30 核对，2026-11-18 复核仍是最新正式版）。** SGLang 0.5.23 的 git tag（`297e54f`）和 PyPI wheel 于 2026-10-30 发布；GitHub 的 [Release 说明页](https://github.com/sgl-project/sglang/releases/tag/v0.5.23)晚几天，于 2026-11-02 22:14:10 UTC（上海时间 11-03 06:14）发布，现已可查。官方镜像 `lmsysorg/sglang:v0.5.23` 是 CUDA 13.0.3，入口是 NVIDIA 的 `nvidia_entrypoint.sh`，后面直接跟 `sglang serve …`。[安装文档](https://docs.sglang.io/docs/get-started/install)写明 SGLang 只支持 CUDA 13，`v0.5.19-cu129` 是最后一个 CUDA 12 镜像。wheel 要 Python ≥ 3.11、glibc ≥ 2.34（`manylinux_2_34`），el8 装不上，Pod 里同样用镜像。依赖 torch 2.14.1、transformers 5.19.0，和 vLLM 0.34 的 torch 2.14.0 只差一个补丁版本，但 pip 会互相改动对方的钉点，**两个引擎仍不要装进同一个环境**。SGLang 社区对 1.0 的预告不是发布：2026-11-18 时 GitHub Release、PyPI 和 Docker Hub 上最新的都是 0.5.23，本手册不跟预告改钉点。
 
 **T4：只读不跑。** 本仓库没有 SGLang + Qwen3.5-9B + W4A16 + T4 的核对过的配方。官方文档说 FlashInfer 在 SM75 上出问题时改用 `--attention-backend triton --sampling-backend pytorch`，但 W4A16 加载、FP16、GDN 在 SM75 上的内核要一起成立，加上 CUDA 13 对驱动的要求，任何一项不成立就停，把缺口写进记录。不要照抄 BF16、262144 上下文的命令。
 
@@ -415,7 +445,7 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 --model qw
 
 先把 vLLM 记录抄到一边：就绪时间（注明 Docker 还是原生）、块大小 N、Mamba 模式那一行、`cached_tokens` 序列、shared-prefix 开关两组的 TTFT、激活 / KV dtype、注意力后端。然后只比下面三段：
 
-- **就绪时间。** 权重从磁盘进 GPU 的等待，和请求的 TTFT 不是一回事。SGLang 的 InstantTensor 加载器针对前一段，项目报告称加载约快 10 倍；同页的测量是 DeepSeek-R1、8×H200、50 GB/s 存储，从 160 s 降到 15.3 s，不是 27B，也不是 H20。0.32 的 vLLM 也把 `instanttensor` 列为依赖。你能比的是同一块盘、同一份权重上的就绪时间。
+- **就绪时间。** 权重从磁盘进 GPU 的等待，和请求的 TTFT 不是一回事。SGLang 的 InstantTensor 加载器针对前一段，项目报告称加载约快 10 倍；同页的测量是 DeepSeek-R1、8×H200、50 GB/s 存储，从 160 s 降到 15.3 s，不是 27B，也不是 H20。0.34 的 vLLM 也把 `instanttensor` 列为依赖。你能比的是同一块盘、同一份权重上的就绪时间。
 - **同一条 shared-prefix 的 TTFT 和缓存命中。** 协议与第 6 节相同：顺序、预热、只改 user 后缀。SGLang 的 KV 按 token 进 Radix 树，GDN 状态另按 `--mamba-radix-cache-strategy` 和 `--mamba-track-interval`（默认 256）存，命中粒度和 vLLM 的 N 不是一回事；两边都以 usage 里的 `cached_tokens` 和各自的 `/metrics`（SGLang 是 `sglang:cache_hit_rate`、`sglang:cached_tokens_total`）为准。上面的命令不带 `--enable-hierarchical-cache`：HiCache 会把放不下的前缀留在主机内存里，命中就不再只取决于显存，和 vLLM 那组比的就不是同一件事。两引擎都能跑通之前，不做吞吐胜负。
 - **prefill 与 decode 是否还挤在同一步。** 单卡拆不开。PD 分离把长 prompt 的 prefill 和持续的 decode 放到不同实例，用搬走 KV 换掉「重算 prompt」和「decode 被 prefill 挡住」。SGLang 在长 prompt 负载上报告过吞吐最多增加 27%、p95 TTFT 降到约一半，那是他们的测量。单卡上能看到的，是第 5 节里 TTFT 与 token 间隔怎样一起变。
 
@@ -423,15 +453,15 @@ python3 examples/stream-bench.py --base-url http://127.0.0.1:30000/v1 --model qw
 
 低延迟插件（PDL、GEMM 收尾里的 all-reduce、AMD monokernel）要 GB300 / MI355X 这一档的 GPU，两条轨道都不打开。只有两引擎都用同一 checkpoint/revision、精度、长度、采样与前缀条件跑通之后，才把吞吐放在一起比。
 
-## 官方依据（核对日期 2026-10-30，发布状态 2026-11-07 补核）
+## 官方依据（核对日期 2026-11-18）
 
-实验命令对照 vLLM v0.32.0 与 SGLang v0.5.23。正文里的外部测量分别来自 SGLang 对加载与 PD 的报告，以及 LMSYS 的低延迟内核文章，都不是 T4 或 H20 上的结果。
+实验命令对照 vLLM v0.34.0 与 SGLang v0.5.23。正文里的外部测量分别来自 vLLM 与 SGLang 各自的 Release 说明和 LMSYS 文章，都不是 T4 或 H20 上的结果。
 
-- [vLLM v0.32.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)：默认镜像与 PyPI wheel 是 CUDA 13.0，另有 `-cu129`；Python 3.11–3.14；`transformers>=5.16.1,<5.20.0`；删除 `mamba_cache_mode="all"`；`max_tokens` 不再从上下文预留。[PyPI 上的 0.32.0](https://pypi.org/project/vllm/0.32.0/#files)：x86_64 wheel 为 `manylinux_2_28`。镜像元数据（Docker Hub 注册表）：两个标签的入口都是 `vllm serve`，`TORCH_CUDA_ARCH_LIST` 含 7.5 与 9.0，CUDA 13.0.2 / 12.9.1。
-- 发布状态（2026-11-07 核对）：[vLLM v0.33.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.33.0rc3)，GitHub API 显示 `name` 为 v0.33.0、`tag_name` 为 `v0.33.0rc3`、`prerelease: false`，2026-11-02 10:10:05 UTC 发布，`v0.33.0` tag 与 `v0.33.0rc3` 指向同一提交 `4ba787e`；同日 [PyPI 上的 0.33.0](https://pypi.org/project/vllm/0.33.0/#files) 上传，Docker Hub 有 `v0.33.0`、没有 `v0.33.0-cu129`。说明里写明 CUDA 12.9 wheel 与 `-cu129` 镜像不再发布（[#62575](https://github.com/vllm-project/vllm/pull/62575)）。
-- [0.32 安装文档里的旧驱动说明](https://github.com/vllm-project/vllm/blob/v0.32.0/docs/getting_started/installation/gpu.cuda.inc.md)：CUDA 13 镜像正常需要 R580，兼容模式支持 R535 与 R570，只限专业和数据中心卡；[NVIDIA 前向兼容](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)：`cuda-compat-13-0` 与 535+、570+ 兼容，错误码 803 / 804，PTX JIT 不受小版本兼容那条限制；[vLLM 的兼容开关实现](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/env_override.py)与[默认 fork 的进程方式](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/utils/system_utils.py)。[PR #36579](https://github.com/vllm-project/vllm/pull/36579) 描述了 Marlin 在 SM90 上只带 PTX、cu129 配旧驱动时报错的情形。
-- 0.32 源码：[`vllm serve` 把位置参数写回 `--model`](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/entrypoints/cli/serve.py)，[`api_server` 模块已弃用](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/entrypoints/openai/api_server.py)；[cache 配置](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/config/cache.py)（`align` / `none`、`prefix_cache_retention_interval`）；[Mamba 模式与 Qwen3.5 状态 dtype](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/model_executor/models/config.py)；[混合块大小对齐](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/platforms/interface.py)；[调度器的检查点停靠点](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/core/sched/scheduler.py)；[注意力后端优先级](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/platforms/cuda.py)与 [FlashInfer 的 SM75 门槛](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/attention/backends/flashinfer.py)；[W4A16 内核顺序](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/model_executor/kernels/linear/__init__.py)；[服务默认的批大小](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/engine/arg_utils.py)；[异步调度的默认与兼容条件](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/config/vllm.py)；[prefix cache 指标](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/metrics/loggers.py)。
-- [0.32 APC 说明](https://docs.vllm.ai/en/v0.32.0/features/automatic_prefix_caching/)与 [0.32 benchmark CLI](https://docs.vllm.ai/en/v0.32.0/benchmarking/cli/)。
+- [vLLM v0.34.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.34.0)（2026-11-16 23:22 UTC 发布，`prerelease: false`，tag 指向 `0c57b41`）：extensible KV cache 默认开启及其 TPOT 取舍（[#56492](https://github.com/vllm-project/vllm/pull/56492)）、默认块大小 64（[#63231](https://github.com/vllm-project/vllm/pull/63231)）、删除 Model Runner V1（[#63373](https://github.com/vllm-project/vllm/pull/63373)）、只有 CUDA 13.0 的 wheel 与镜像。[PyPI 上的 0.34.0](https://pypi.org/project/vllm/0.34.0/#files)：x86_64 wheel 为 `manylinux_2_28`，Python 3.11–3.14。[0.33.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.33.0rc3)：停发 CUDA 12.9 wheel 与 `-cu129` 镜像（[#62575](https://github.com/vllm-project/vllm/pull/62575)），FlashInfer GDN prefill 内部检查点（[#60050](https://github.com/vllm-project/vllm/pull/60050)）。
+- 0.34 源码：[cache 配置](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/config/cache.py)（`DEFAULT_BLOCK_SIZE = 64`、`resolved_gpu_memory_utilization`、`align` / `none`、`prefix_cache_retention_interval`）；[extensible KV cache 的开关判定](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/config/vllm.py)（`_resolve_extensible_kv_cache`，同文件还有异步调度的默认与关闭条件）与 [warmup 后的提交和 `gpu_memory_utilization` 警告](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/v1/worker/extensible_kv_cache.py)；[混合块大小对齐](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/platforms/interface.py)（`_align_hybrid_block_size`、`update_block_size_for_backend`，以及 `VLLM_USE_V2_MODEL_RUNNER` 的启动检查）；[GDN prefill 后端选择与 FlashInfer 检查点](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py)；[调度器的检查点停靠点](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/v1/core/sched/scheduler.py)；[Mamba 模式与 Qwen3.5 状态 dtype](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/model_executor/models/config.py)；[`--mamba-cache-mode` 弃用与服务默认批大小](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/engine/arg_utils.py)；[注意力后端优先级](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/platforms/cuda.py)、[FlashAttention 的最小块](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/v1/attention/backends/flash_attn.py)与 [FlashInfer 的 SM75 门槛](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/v1/attention/backends/flashinfer.py)；[W4A16 内核顺序](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/model_executor/kernels/linear/__init__.py)；[构建架构列表](https://github.com/vllm-project/vllm/blob/v0.34.0/CMakeLists.txt)与 [Dockerfile](https://github.com/vllm-project/vllm/blob/v0.34.0/docker/Dockerfile)（含 7.5 与 9.0）；[依赖钉点](https://github.com/vllm-project/vllm/blob/v0.34.0/requirements/common.txt)（transformers）与 [CUDA 依赖](https://github.com/vllm-project/vllm/blob/v0.34.0/requirements/cuda.txt)（torch 2.14.0、instanttensor）；[`vllm serve` 把位置参数写回 `--model`](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/entrypoints/cli/serve.py)，[`api_server` 模块已弃用](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/entrypoints/openai/api_server.py)；[prefix cache 指标](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/v1/metrics/loggers.py)。
+- [0.34 安装文档](https://github.com/vllm-project/vllm/blob/v0.34.0/docs/getting_started/installation/gpu.cuda.inc.md)：算力 7.5 及以上；CUDA 13 镜像正常需要 R580，兼容模式支持 R535 与 R570，只限专业和数据中心卡（同一文件开头几处「CUDA 12.9 构建」的写法已过时，见第 2 节）。[NVIDIA 前向兼容](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)：`cuda-compat-13-0` 与 535+、570+ 兼容，示例输出为 Tesla T4，错误码 803 / 804，PTX JIT 不受小版本兼容那条限制；[vLLM 的兼容开关实现](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/env_override.py)与[默认 fork 的进程方式](https://github.com/vllm-project/vllm/blob/v0.34.0/vllm/envs.py)。[PyTorch 的 torch 2.14.0 构建](https://download.pytorch.org/whl/torch/)：cu126 / cu130 / cu132，没有 cu129。
+- 回退：[vLLM v0.32.0 发布说明](https://github.com/vllm-project/vllm/releases/tag/v0.32.0)（默认 CUDA 13.0，另有 `-cu129` 镜像和 wheel，torch 2.13.0）与[上一版手册](https://github.com/evenchen6/vllm-sglang-handbook/tree/afbaa89/docs/t4-qwen35-lab.md)（按 0.32.0 写的块大小与预期）；[PR #36579](https://github.com/vllm-project/vllm/pull/36579) 描述了 Marlin 在 SM90 上只带 PTX、cu129 配旧驱动时报错的情形。
+- [0.34 APC 说明](https://docs.vllm.ai/en/v0.34.0/features/automatic_prefix_caching/)与 [0.34 benchmark CLI](https://docs.vllm.ai/en/v0.34.0/benchmarking/cli/)。
 - 模型：[Qwen3.5-9B 模型卡](https://huggingface.co/Qwen/Qwen3.5-9B)、[RedHatAI W4A16 模型卡](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16)（评估环境 vLLM 0.18.1）与[该 revision 的量化配置](https://huggingface.co/RedHatAI/Qwen3.5-9B-quantized.w4a16/blob/a398088c4228b0ae0c8c78df88fd1e4bf445f068/config.json)；[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) 与 [FP8 版](https://huggingface.co/Qwen/Qwen3.8-27B-FP8)的模型卡和[固定 revision 的 config](https://huggingface.co/Qwen/Qwen3.8-27B-FP8/blob/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a/config.json)；[vLLM recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)（`--reasoning-parser qwen3`、MTP 写法、单张 Hopper 用 TP1）。
 - SGLang：[安装指南](https://docs.sglang.io/docs/get-started/install)（只支持 CUDA 13、SM75 的后备参数）、[Qwen3.8-27B cookbook](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8-27B)（H200 配方、GDN 状态池与 `--mamba-full-memory-ratio`）、[v0.5.23 tag](https://github.com/sgl-project/sglang/tree/v0.5.23)、[v0.5.23 Release 说明](https://github.com/sgl-project/sglang/releases/tag/v0.5.23)（2026-11-02 22:14:10 UTC 发布）、[PyPI 上的 0.5.23](https://pypi.org/project/sglang/0.5.23/#files)；[SGLang 对 InstantTensor 与 PD 的报告](https://github.com/sgl-project/sglang/releases/tag/v0.5.22)：第 10 节里的加载时间和长 prompt PD 数字。
 - 硬件：[NVIDIA T4 规格](https://www.nvidia.com/en-us/data-center/tesla-t4/)。H20 没有 NVIDIA 官网产品页，屋顶线用的 4.0 TB/s、148 / 296 TFLOPS 来自服务器厂商与媒体流传的规格表（例如 [Tom's Hardware 转述的规格](https://www.tomshardware.com/tech-industry/nvidia-readies-new-ai-and-hpc-gpus-for-china-market-report)），只作估算。
