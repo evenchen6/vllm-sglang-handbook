@@ -38,6 +38,9 @@ ENGINE_H20_27B_FP8 = [
     "--enable-chunked-prefill", "--enable-prompt-tokens-details",
     "--enable-prefix-caching",
 ]
+_CHUNKED = ENGINE_H20_27B_FP8.index("--enable-chunked-prefill") + 1
+ENGINE_H20_27B_FP8_FALLBACK = [*ENGINE_H20_27B_FP8[:_CHUNKED], "--gpu-memory-utilization", "0.90",
+                               *ENGINE_H20_27B_FP8[_CHUNKED:]]
 FAKE_PYTHON = """#!/bin/sh
 if [ "$1" = -c ]; then echo "$FAKE_VLLM"; exit 0; fi
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
@@ -262,8 +265,9 @@ class ServeScriptTests(unittest.TestCase):
         cases = [
             {"name": "535 without compat", "driver": "535.247.01", "env": {}, "hint": True},
             {"name": "535 with compat", "driver": "535.247.01", "env": {"CUDA_COMPAT": "1"}, "hint": False},
-            {"name": "535 with cu129 image", "driver": "535.247.01",
-             "env": {"VLLM_IMAGE": FALLBACK_IMAGE}, "hint": False},
+            {"name": "535 with mirrored cu129 image", "driver": "535.247.01",
+             "env": {"VLLM_VERSION": "0.32.0", "VLLM_IMAGE": "registry.example/vllm-openai:v0.32.0-cu129"},
+             "hint": False},
             {"name": "535 docker 0.32.0 fallback", "driver": "535.247.01", "env": {"VLLM_VERSION": "0.32.0"},
              "hint": False},
             {"name": "535 native 0.32.0 fallback", "driver": "535.247.01",
@@ -301,6 +305,12 @@ class ServeScriptTests(unittest.TestCase):
             (T4, {"ASYNC_SCHED": "on"}), (T4, {"PROFILE": "9b-bf16"}), (T4, {"CUDA_COMPAT": "yes"}),
             (T4, {"PROFILE": "27b-fp8"}), (H20, {"PROFILE": "4b-fp16"}), (H20, {"PREFIX_CACHE": "on"}),
             (SHARED, {"MACHINE": "a100"}), (T4, {"VLLM_VERSION": "0.33.0"}), (H20, {"VLLM_VERSION": "0.18.1"}),
+            (T4, {"MEM_UTIL": "85"}), (T4, {"MEM_UTIL": "0"}), (T4, {"MEM_UTIL": "0.0"}),
+            (H20, {"MEM_UTIL": "1.5"}), (H20, {"MEM_UTIL": "0.9x"}), (H20, {"MEM_UTIL": "-0.5"}),
+            (H20, {"VLLM_VERSION": "0.32.0", "MEM_UTIL": "auto"}),
+            (H20, {"VLLM_IMAGE": FALLBACK_IMAGE}), (T4, {"VLLM_IMAGE": "vllm/vllm-openai:v0.33.0"}),
+            (H20, {"VLLM_VERSION": "0.32.0", "VLLM_IMAGE": IMAGE}),
+            (H20, {"VLLM_IMAGE": "registry.example/vllm/vllm-openai:v0.32.0-cu129"}),
         ]
         for script, env in cases:
             with self.subTest(script=script.name, **env):
@@ -318,7 +328,7 @@ class ServeScriptTests(unittest.TestCase):
         cases = [
             {"name": "pinned", "script": T4, "found": "0.34.0", "code": 0, "engine": ENGINE_T4_9B},
             {"name": "fallback cu129 build", "script": H20, "found": "0.32.0+cu129", "code": 0,
-             "env": {"VLLM_VERSION": "0.32.0"}, "engine": ENGINE_H20_27B_FP8},
+             "env": {"VLLM_VERSION": "0.32.0"}, "engine": ENGINE_H20_27B_FP8_FALLBACK},
             {"name": "previous pin without the fallback switch", "script": H20, "found": "0.32.0+cu129",
              "code": 1},
             {"name": "old pin", "script": T4, "found": "0.18.1", "code": 1},
@@ -373,16 +383,26 @@ class ServeScriptTests(unittest.TestCase):
             self.assertIn("VLLM_ENABLE_CUDA_COMPATIBILITY=1", lines)
 
     def test_fallback_version_keeps_engine_args_and_uses_cu129_image(self):
-        for script in (T4, H20):
+        for script, engine in ((T4, ENGINE_T4_9B), (H20, ENGINE_H20_27B_FP8_FALLBACK)):
             with self.subTest(script.name):
                 fallback = dry_run(script, VLLM_VERSION="0.32.0")
                 self.assertIn(FALLBACK_IMAGE, fallback)
                 self.assertNotIn(IMAGE, fallback)
-                self.assertEqual(engine_args(fallback, FALLBACK_IMAGE), engine_args(dry_run(script)))
+                self.assertEqual(engine_args(fallback, FALLBACK_IMAGE), engine)
                 result = run(script, DRY_RUN="1", RUNTIME="native", PYTHON="/missing/python", VLLM_VERSION="0.32.0")
                 self.assertIn("(needs vllm==0.32.0)", result.stdout)
-                override = dry_run(script, VLLM_VERSION="0.32.0", VLLM_IMAGE="vllm/vllm-openai:v0.32.0")
-                self.assertIn("vllm/vllm-openai:v0.32.0", override)
+                for image in ("vllm/vllm-openai:v0.32.0", "registry.example/vllm/vllm-openai:v0.32.0-cu129",
+                              f"{FALLBACK_IMAGE}@sha256:{'0' * 64}"):
+                    self.assertIn(image, dry_run(script, VLLM_VERSION="0.32.0", VLLM_IMAGE=image))
+                self.assertEqual(
+                    engine_args(dry_run(script, VLLM_VERSION="0.32.0", MEM_UTIL="0.8"), FALLBACK_IMAGE)
+                    [engine.index("--gpu-memory-utilization") + 1], "0.8")
+
+    def test_mem_util_accepts_fractions(self):
+        for value in ("0.85", ".9", "1", "1.0", "0.05"):
+            with self.subTest(value):
+                args = engine_args(dry_run(H20, MEM_UTIL=value))
+                self.assertEqual(args[args.index("--gpu-memory-utilization") + 1], value)
 
     def test_docker_exec_matches_dry_run_and_missing_docker_points_to_native(self):
         for script in (T4, H20):
