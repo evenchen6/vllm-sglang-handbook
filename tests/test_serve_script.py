@@ -13,7 +13,8 @@ T4 = ROOT / "scripts/serve-vllm-t4.sh"
 H20 = ROOT / "scripts/serve-vllm-h20.sh"
 BASH = shutil.which("bash")
 CACHE = f"{ROOT}/.cache/huggingface"
-IMAGE = "vllm/vllm-openai:v0.32.0"
+IMAGE = "vllm/vllm-openai:v0.34.0"
+FALLBACK_IMAGE = "vllm/vllm-openai:v0.32.0-cu129"
 COMPAT_DIR = "/usr/local/cuda/compat"
 ENGINE_T4_9B = [
     "RedHatAI/Qwen3.5-9B-quantized.w4a16",
@@ -34,9 +35,12 @@ ENGINE_H20_27B_FP8 = [
     "--dtype", "bfloat16", "--kv-cache-dtype", "auto", "--language-model-only",
     "--reasoning-parser", "qwen3",
     "--max-model-len", "32768", "--max-num-seqs", "64", "--max-num-batched-tokens", "8192",
-    "--enable-chunked-prefill", "--gpu-memory-utilization", "0.90", "--enable-prompt-tokens-details",
+    "--enable-chunked-prefill", "--enable-prompt-tokens-details",
     "--enable-prefix-caching",
 ]
+_CHUNKED = ENGINE_H20_27B_FP8.index("--enable-chunked-prefill") + 1
+ENGINE_H20_27B_FP8_FALLBACK = [*ENGINE_H20_27B_FP8[:_CHUNKED], "--gpu-memory-utilization", "0.90",
+                               *ENGINE_H20_27B_FP8[_CHUNKED:]]
 FAKE_PYTHON = """#!/bin/sh
 if [ "$1" = -c ]; then echo "$FAKE_VLLM"; exit 0; fi
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
@@ -154,6 +158,12 @@ class ServeScriptTests(unittest.TestCase):
              "pairs": {"--attention-backend": "FLASHINFER"}},
             {"name": "t4 attention backend left to vLLM", "script": T4, "env": {"ATTENTION_BACKEND": "auto"},
              "absent": ["--attention-backend"]},
+            {"name": "h20 leaves KV sizing to the extensible KV cache", "script": H20, "env": {},
+             "absent": ["--gpu-memory-utilization", "--block-size", "--no-enable-extensible-kv-cache"]},
+            {"name": "t4 keeps its conservative memory cap", "script": T4, "env": {},
+             "pairs": {"--gpu-memory-utilization": "0.85"}},
+            {"name": "t4 memory cap left to vLLM", "script": T4, "env": {"MEM_UTIL": "auto"},
+             "absent": ["--gpu-memory-utilization"]},
             {"name": "h20 scheduler and memory knobs", "script": H20,
              "env": {"MAX_LEN": "65536", "MAX_SEQS": "128", "BATCHED_TOKENS": "16384", "MEM_UTIL": "0.92",
                      "KV_DTYPE": "fp8"},
@@ -255,8 +265,13 @@ class ServeScriptTests(unittest.TestCase):
         cases = [
             {"name": "535 without compat", "driver": "535.247.01", "env": {}, "hint": True},
             {"name": "535 with compat", "driver": "535.247.01", "env": {"CUDA_COMPAT": "1"}, "hint": False},
-            {"name": "535 with cu129 image", "driver": "535.247.01",
-             "env": {"VLLM_IMAGE": "vllm/vllm-openai:v0.32.0-cu129"}, "hint": False},
+            {"name": "535 with mirrored cu129 image", "driver": "535.247.01",
+             "env": {"VLLM_VERSION": "0.32.0", "VLLM_IMAGE": "registry.example/vllm-openai:v0.32.0-cu129"},
+             "hint": False},
+            {"name": "535 docker 0.32.0 fallback", "driver": "535.247.01", "env": {"VLLM_VERSION": "0.32.0"},
+             "hint": False},
+            {"name": "535 native 0.32.0 fallback", "driver": "535.247.01",
+             "env": {"VLLM_VERSION": "0.32.0", "RUNTIME": "native"}, "hint": False},
             {"name": "535 native", "driver": "535.247.01", "env": {"RUNTIME": "native"}, "hint": True},
             {"name": "580 driver", "driver": "580.95.05", "env": {}, "hint": False},
             {"name": "unparsable output", "driver": "N/A", "env": {}, "hint": False},
@@ -270,6 +285,8 @@ class ServeScriptTests(unittest.TestCase):
                 self.assertEqual("CUDA_COMPAT=1" in result.stderr, case["hint"], result.stderr)
                 if case["hint"]:
                     self.assertIn(f"driver {case['driver']} is older than R580", result.stderr)
+                    self.assertIn("VLLM_VERSION=0.32.0 (vllm/vllm-openai:v0.32.0-cu129)", result.stderr)
+                    self.assertNotRegex(result.stderr, r"v0\.3[3-9]\.\d+-cu12")
                 plain = run(H20, DRY_RUN="1", **case["env"])
                 self.assertEqual(result.stdout, plain.stdout)
 
@@ -287,7 +304,13 @@ class ServeScriptTests(unittest.TestCase):
             (T4, {"RUNTIME": "podman"}), (T4, {"PREFIX_CACHE": "2"}), (T4, {"EAGER": "yes"}),
             (T4, {"ASYNC_SCHED": "on"}), (T4, {"PROFILE": "9b-bf16"}), (T4, {"CUDA_COMPAT": "yes"}),
             (T4, {"PROFILE": "27b-fp8"}), (H20, {"PROFILE": "4b-fp16"}), (H20, {"PREFIX_CACHE": "on"}),
-            (SHARED, {"MACHINE": "a100"}),
+            (SHARED, {"MACHINE": "a100"}), (T4, {"VLLM_VERSION": "0.33.0"}), (H20, {"VLLM_VERSION": "0.18.1"}),
+            (T4, {"MEM_UTIL": "85"}), (T4, {"MEM_UTIL": "0"}), (T4, {"MEM_UTIL": "0.0"}),
+            (H20, {"MEM_UTIL": "1.5"}), (H20, {"MEM_UTIL": "0.9x"}), (H20, {"MEM_UTIL": "-0.5"}),
+            (H20, {"VLLM_VERSION": "0.32.0", "MEM_UTIL": "auto"}),
+            (H20, {"VLLM_IMAGE": FALLBACK_IMAGE}), (T4, {"VLLM_IMAGE": "vllm/vllm-openai:v0.33.0"}),
+            (H20, {"VLLM_VERSION": "0.32.0", "VLLM_IMAGE": IMAGE}),
+            (H20, {"VLLM_IMAGE": "registry.example/vllm/vllm-openai:v0.32.0-cu129"}),
         ]
         for script, env in cases:
             with self.subTest(script=script.name, **env):
@@ -299,26 +322,35 @@ class ServeScriptTests(unittest.TestCase):
                 result = run(script, DRY_RUN="1", RUNTIME="native", PYTHON="/missing/python")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"Machine: {machine}\n", result.stdout)
-                self.assertIn("Runtime: native\nPython: /missing/python (needs vllm==0.32.0)", result.stdout)
+                self.assertIn("Runtime: native\nPython: /missing/python (needs vllm==0.34.0)", result.stdout)
 
     def test_native_execs_checked_interpreter(self):
         cases = [
-            {"name": "pinned", "script": T4, "found": "0.32.0", "code": 0, "engine": ENGINE_T4_9B},
-            {"name": "pinned cu129 build", "script": H20, "found": "0.32.0+cu129", "code": 0,
-             "engine": ENGINE_H20_27B_FP8},
+            {"name": "pinned", "script": T4, "found": "0.34.0", "code": 0, "engine": ENGINE_T4_9B},
+            {"name": "fallback cu129 build", "script": H20, "found": "0.32.0+cu129", "code": 0,
+             "env": {"VLLM_VERSION": "0.32.0"}, "engine": ENGINE_H20_27B_FP8_FALLBACK},
+            {"name": "previous pin without the fallback switch", "script": H20, "found": "0.32.0+cu129",
+             "code": 1},
             {"name": "old pin", "script": T4, "found": "0.18.1", "code": 1},
             {"name": "not installed", "script": H20, "found": "", "code": 1},
+            {"name": "fallback not installed", "script": T4, "found": "0.34.0", "code": 1,
+             "env": {"VLLM_VERSION": "0.32.0"}},
         ]
         for case in cases:
             with self.subTest(case["name"]), tempfile.TemporaryDirectory() as directory:
                 python = fake_executable(directory, "python", FAKE_PYTHON)
                 cache = Path(directory) / "hf"
                 result = run(case["script"], RUNTIME="native", PYTHON=str(python), FAKE_VLLM=case["found"],
-                             HF_CACHE_DIR=str(cache))
+                             HF_CACHE_DIR=str(cache), **case.get("env", {}))
                 self.assertEqual(result.returncode, case["code"], result.stderr)
+                if case["code"] and case.get("env", {}).get("VLLM_VERSION") == "0.32.0":
+                    self.assertIn(f"{FALLBACK_IMAGE} as the pod image", result.stderr)
+                    self.assertIn("vllm-0.32.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl' --torch-backend=cu129",
+                                  result.stderr)
+                if case["code"] and "env" not in case:
+                    self.assertIn("uv pip install 'vllm==0.34.0' --torch-backend=cu130", result.stderr)
+                    self.assertIn(f"{IMAGE} as the pod image", result.stderr)
                 if case["code"]:
-                    self.assertIn("uv pip install 'vllm==0.32.0'", result.stderr)
-                    self.assertIn("vllm/vllm-openai:v0.32.0 as the pod image", result.stderr)
                     self.assertIn(f"found: {case['found'] or 'none'}", result.stderr)
                     self.assertFalse(cache.exists())
                     continue
@@ -335,20 +367,42 @@ class ServeScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             python = fake_executable(directory, "python", FAKE_PYTHON)
             missing = Path(directory) / "missing-compat"
-            result = run(H20, RUNTIME="native", PYTHON=str(python), FAKE_VLLM="0.32.0", CUDA_COMPAT="1",
+            result = run(H20, RUNTIME="native", PYTHON=str(python), FAKE_VLLM="0.34.0", CUDA_COMPAT="1",
                          CUDA_COMPAT_DIR=str(missing), HF_CACHE_DIR=str(Path(directory) / "hf"))
             self.assertEqual(result.returncode, 1)
             self.assertIn(f"forward-compatibility libraries in {missing}", result.stderr)
 
             compat = Path(directory) / "compat"
             compat.mkdir()
-            result = run(H20, RUNTIME="native", PYTHON=str(python), FAKE_VLLM="0.32.0", CUDA_COMPAT="1",
+            result = run(H20, RUNTIME="native", PYTHON=str(python), FAKE_VLLM="0.34.0", CUDA_COMPAT="1",
                          CUDA_COMPAT_DIR=str(compat), LD_LIBRARY_PATH="/opt/lib",
                          HF_CACHE_DIR=str(Path(directory) / "hf"))
             self.assertEqual(result.returncode, 0, result.stderr)
             lines = result.stdout.splitlines()
             self.assertIn(f"LD_LIBRARY_PATH={compat}:/opt/lib", lines)
             self.assertIn("VLLM_ENABLE_CUDA_COMPATIBILITY=1", lines)
+
+    def test_fallback_version_keeps_engine_args_and_uses_cu129_image(self):
+        for script, engine in ((T4, ENGINE_T4_9B), (H20, ENGINE_H20_27B_FP8_FALLBACK)):
+            with self.subTest(script.name):
+                fallback = dry_run(script, VLLM_VERSION="0.32.0")
+                self.assertIn(FALLBACK_IMAGE, fallback)
+                self.assertNotIn(IMAGE, fallback)
+                self.assertEqual(engine_args(fallback, FALLBACK_IMAGE), engine)
+                result = run(script, DRY_RUN="1", RUNTIME="native", PYTHON="/missing/python", VLLM_VERSION="0.32.0")
+                self.assertIn("(needs vllm==0.32.0)", result.stdout)
+                for image in ("vllm/vllm-openai:v0.32.0", "registry.example/vllm/vllm-openai:v0.32.0-cu129",
+                              f"{FALLBACK_IMAGE}@sha256:{'0' * 64}"):
+                    self.assertIn(image, dry_run(script, VLLM_VERSION="0.32.0", VLLM_IMAGE=image))
+                self.assertEqual(
+                    engine_args(dry_run(script, VLLM_VERSION="0.32.0", MEM_UTIL="0.8"), FALLBACK_IMAGE)
+                    [engine.index("--gpu-memory-utilization") + 1], "0.8")
+
+    def test_mem_util_accepts_fractions(self):
+        for value in ("0.85", ".9", "1", "1.0", "0.05"):
+            with self.subTest(value):
+                args = engine_args(dry_run(H20, MEM_UTIL=value))
+                self.assertEqual(args[args.index("--gpu-memory-utilization") + 1], value)
 
     def test_docker_exec_matches_dry_run_and_missing_docker_points_to_native(self):
         for script in (T4, H20):

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Qwen hybrid (GDN) models on vLLM 0.32.0, one launcher for both study tracks.
+# Qwen hybrid (GDN) models on vLLM 0.34.0, one launcher for both study tracks.
 # MACHINE=t4: constrained path (SM75, Qwen3.5-9B W4A16, short context, conservative start).
-# MACHINE=h20: current mainline (SM90, Qwen3.8-27B FP8/BF16, engine defaults for caching and graphs).
+# MACHINE=h20: current mainline (SM90, Qwen3.8-27B FP8/BF16, engine defaults for caching, graphs, KV sizing).
 # serve-vllm-t4.sh / serve-vllm-h20.sh pin MACHINE. RUNTIME=docker (default) runs the pinned image;
-# RUNTIME=native hands the same engine arguments to a local vllm==0.32.0 (GPU pods without Docker).
+# RUNTIME=native hands the same engine arguments to a local vllm==0.34.0 (GPU pods without Docker).
+# VLLM_VERSION=0.32.0 is only the fallback for drivers where CUDA 13 forward compatibility fails:
+# 0.33+ ships no CUDA 12.9 build, 0.32.0 still has -cu129. Its block sizes and defaults differ.
 # Script arguments are appended to the engine arguments. Source-checked starting points, not benchmarks.
 set -euo pipefail
 
@@ -16,8 +18,8 @@ case "$machine" in
     ;;
   h20)
     profiles='27b-fp8 27b-bf16 9b-w4a16' dtype=bfloat16 container=qwen38-h20
-    default_backend=auto default_len=32768 default_seqs=64 default_batched=8192
-    default_mem=0.90 default_prefix=1 default_eager=0
+    default_backend=auto default_len=32768 default_seqs=64     default_batched=8192
+    default_mem=auto default_prefix=1 default_eager=0
     ;;
   *) printf 'MACHINE must be t4 or h20\n' >&2; exit 2 ;;
 esac
@@ -61,15 +63,31 @@ case "$runtime" in
   *) printf 'RUNTIME must be docker or native\n' >&2; exit 2 ;;
 esac
 
-vllm_version='0.32.0'
-image="${VLLM_IMAGE:-vllm/vllm-openai:v$vllm_version}"
+vllm_version="${VLLM_VERSION:-0.34.0}"
+case "$vllm_version" in
+  0.34.0) default_image="vllm/vllm-openai:v$vllm_version" ;;
+  0.32.0) default_image="vllm/vllm-openai:v$vllm_version-cu129" ;;
+  *) printf 'VLLM_VERSION must be 0.34.0 (default) or 0.32.0 (CUDA 12.9 fallback)\n' >&2; exit 2 ;;
+esac
+# 0.32 has no extensible KV cache; unset it would take its own 0.92 default, not the handbook's 0.90.
+[[ "$vllm_version" = 0.32.0 && "$default_mem" = auto ]] && default_mem=0.90
+image="${VLLM_IMAGE:-$default_image}"
+case "$image" in
+  *vllm-openai:v"$vllm_version"|*vllm-openai:v"$vllm_version"[-@]*) ;;
+  *vllm-openai:v[0-9]*)
+    printf 'VLLM_IMAGE %s does not match VLLM_VERSION=%s; set both (block sizes and defaults differ by version)\n' \
+      "$image" "$vllm_version" >&2
+    exit 2
+    ;;
+esac
 revision="${MODEL_REVISION:-$revision}"
 cache_dir="${HF_CACHE_DIR:-$default_cache}"
 [[ "$cache_dir" = /* ]] || cache_dir="$PWD/$cache_dir"
 
 # CUDA 13 builds need an R580+ driver. Forward compatibility (datacenter GPUs on R535/R570) needs
-# the compat libcuda on the loader path when each process starts: the engine core and workers are
-# forked, so vLLM's in-process VLLM_ENABLE_CUDA_COMPATIBILITY alone does not reach them.
+# the compat libcuda on the loader path when each process starts. VLLM_ENABLE_CUDA_COMPATIBILITY only
+# edits os.environ in-process; the loader read LD_LIBRARY_PATH at exec, so that edit reaches exec'd
+# children but not the current process or forked engine core/workers (fork is the default).
 compat_dir="${CUDA_COMPAT_DIR:-/usr/local/cuda/compat}"
 compat_env=()
 case "${CUDA_COMPAT:-0}" in
@@ -100,9 +118,19 @@ engine_args+=(
   --max-num-seqs "${MAX_SEQS:-$default_seqs}"
   --max-num-batched-tokens "${BATCHED_TOKENS:-$default_batched}"
   --enable-chunked-prefill
-  --gpu-memory-utilization "${MEM_UTIL:-$default_mem}"
-  --enable-prompt-tokens-details
 )
+# 0.34 sizes the KV cache from memory measured after warmup when --gpu-memory-utilization is unset
+# (0.92 of the device if the extensible KV cache gets disabled); an explicit value still caps the instance.
+mem_util="${MEM_UTIL:-$default_mem}"
+if [[ "$mem_util" = auto ]]; then
+  [[ "$vllm_version" = 0.34.0 ]] || { printf 'MEM_UTIL=auto needs VLLM_VERSION=0.34.0\n' >&2; exit 2; }
+elif [[ "$mem_util" =~ ^(0?\.[0-9]*[1-9][0-9]*|1(\.0*)?)$ ]]; then
+  engine_args+=(--gpu-memory-utilization "$mem_util")
+else
+  printf 'MEM_UTIL must be auto or a fraction in (0, 1], got: %s\n' "$mem_util" >&2
+  exit 2
+fi
+engine_args+=(--enable-prompt-tokens-details)
 case "${PREFIX_CACHE:-$default_prefix}" in
   0) engine_args+=(--no-enable-prefix-caching) ;;
   1) engine_args+=(--enable-prefix-caching) ;;
@@ -149,9 +177,10 @@ if [[ "${CUDA_COMPAT:-0}" = 0 ]] && command -v nvidia-smi >/dev/null; then
   driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)" || driver=''
   driver="${driver%%$'\n'*}"
   if [[ "${driver%%.*}" =~ ^[0-9]+$ ]] && (( ${driver%%.*} < 580 )) \
-      && ! [[ "$runtime" = docker && "$image" = *-cu12* ]]; then
+      && ! [[ "$runtime" = docker && "$image" = *-cu12* ]] \
+      && ! [[ "$runtime" = native && "$vllm_version" = 0.32.0 ]]; then
     printf 'Note: driver %s is older than R580, which CUDA 13 builds (the default image and PyPI wheel) need.\n' "$driver" >&2
-    printf 'On a datacenter GPU with R535/R570 add CUDA_COMPAT=1, or use VLLM_IMAGE=vllm/vllm-openai:v%s-cu129. See docs/t4-qwen35-lab.md section 2.\n' "$vllm_version" >&2
+    printf 'On a datacenter GPU with R535/R570 add CUDA_COMPAT=1. vLLM 0.33+ has no CUDA 12.9 build: if forward compatibility fails, upgrade the driver or fall back to VLLM_VERSION=0.32.0 (vllm/vllm-openai:v0.32.0-cu129). See docs/t4-qwen35-lab.md section 2.\n' >&2
   fi
 fi
 if [[ "${DRY_RUN:-0}" = 1 ]]; then exit 0; fi
@@ -164,8 +193,13 @@ else
   found="$("$python" -c 'import importlib.metadata as m; print(m.version("vllm"))' 2>/dev/null)" || found=''
   if [[ "${found%%+*}" != "$vllm_version" ]]; then
     printf 'RUNTIME=native needs vllm==%s in %s (found: %s).\n' "$vllm_version" "$python" "${found:-none}" >&2
-    printf 'In a GPU pod, use vllm/vllm-openai:v%s as the pod image: its python3 already has it.\n' "$vllm_version" >&2
-    printf "Or a Python 3.11-3.14 venv: uv pip install 'vllm==%s' --torch-backend=auto (CUDA 13 build).\n" "$vllm_version" >&2
+    if [[ "$vllm_version" = 0.32.0 ]]; then
+      printf 'In a GPU pod, use vllm/vllm-openai:v0.32.0-cu129 as the pod image: its python3 already has it.\n' >&2
+      printf "Or a Python 3.11-3.14 venv: uv pip install 'https://github.com/vllm-project/vllm/releases/download/v0.32.0/vllm-0.32.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl' --torch-backend=cu129\n" >&2
+    else
+      printf 'In a GPU pod, use vllm/vllm-openai:v%s as the pod image: its python3 already has it.\n' "$vllm_version" >&2
+      printf "Or a Python 3.11-3.14 venv: uv pip install 'vllm==%s' --torch-backend=cu130 (CUDA 13 build; 'auto' can pick a CUDA 12 torch on R535).\n" "$vllm_version" >&2
+    fi
     printf 'Below glibc 2.31 (EL8 is 2.28) the llguidance dependency has no wheel and builds from source (needs Rust).\n' >&2
     printf 'Set PYTHON=/path/to/venv/bin/python if the venv is not active; see docs/t4-qwen35-lab.md\n' >&2
     exit 1

@@ -3,8 +3,8 @@
 
 The 9B compressed serving checkpoint is deliberately not loaded through this HF
 example. This smaller, same-generation model is only for five-step cache tracing.
-Needs transformers >= 5.2 (Qwen3_5ForConditionalGeneration); the vLLM 0.32 image
-ships 5.16-5.19.
+Needs transformers >= 5.2 (Qwen3_5ForConditionalGeneration); the vLLM 0.34 image
+pins >=5.16.1,<5.23.
 """
 import argparse
 import json
