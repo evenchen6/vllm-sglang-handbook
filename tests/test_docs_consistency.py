@@ -57,6 +57,15 @@ class DocsConsistencyTest(unittest.TestCase):
             self.assertIsNotNone(first, name)
             self.assertEqual(first.group(1), version, name)
 
+    def test_dates_are_shanghai_time_unless_marked_utc(self):
+        # vLLM 0.34.0 was published 2026-11-16T23:22Z, i.e. 2026-11-17 07:22 in Shanghai.
+        for where, match in occurrences(re.compile(r".*")):
+            line = match.group(0)
+            if "2026-11-16" in line:
+                self.assertIn("UTC 2026-11-16 23:22", line, where)
+            if "UTC" in line:
+                self.assertIn("上海时间", line, where)
+
     def test_hybrid_block_sizes_follow_the_pinned_version(self):
         lab = (ROOT / "docs/t4-qwen35-lab.md").read_text(encoding="utf-8")
         for row in ("| T4，9B，FP16 KV | 2.05 MiB | 4 KiB | 576 | 528 |",
