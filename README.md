@@ -1,6 +1,6 @@
 # 从 Transformer 到 vLLM / SGLang
 
-面向有深度学习与后台开发基础、刚开始接触 LLM 推理的工程师。学习路径固定在 **vLLM 0.32.0**，对照用 **SGLang 0.5.23**。0.32.0 是本手册的学习固定版本，不是最新版：vLLM 0.33.0 已于 2026-11-02 正式发布（2026-11-07 核对），本手册暂不跟进，见实验指南开头。按手上的机器分两条轨道，模型都是 Gated DeltaNet 混合结构，在 vLLM 里是同一个类：
+面向有深度学习与后台开发基础、刚开始接触 LLM 推理的工程师。学习路径固定在 **vLLM 0.34.0**（2026-11-16 发布，2026-11-18 核对仍是最新版），对照用 **SGLang 0.5.23**（同日核对仍是最新正式版）。上一版钉的 0.32.0 只作驱动回退；从 0.32 换到 0.34 哪些概念照旧、哪些实验数字要改，见实验指南开头。按手上的机器分两条轨道，模型都是 Gated DeltaNet 混合结构，在 vLLM 里是同一个类：
 
 - **T4 受限轨**：单张 T4（SM75，标称 16 GB），`Qwen3.5-9B` W4A16、FP16 激活、短上下文，看显存与内核的边界。
 - **H20 主线轨**：单张 H20（SM90，约 96 GiB），`Qwen3.8-27B` FP8（BF16 作对照），看吞吐、前缀缓存、并发与 KV 容量。
@@ -14,7 +14,7 @@
 
 ## 开始
 
-需要 Linux、可用的 NVIDIA 驱动、Docker 与 NVIDIA Container Toolkit；在 K8s GPU Pod 里没有 Docker 时见下文。先阅读实验指南第 2 节：默认镜像 `vllm/vllm-openai:v0.32.0` 是 CUDA 13 构建，驱动低于 R580 时，数据中心卡（T4、H20）在 R535/R570 上要加 `CUDA_COMPAT=1`，或改用 `-cu129` 镜像。`-cu129`（CUDA 12.9）只是 0.32.0 的备选构建，vLLM 从 0.33.0 起不再发布。
+需要 Linux、可用的 NVIDIA 驱动、Docker 与 NVIDIA Container Toolkit；在 K8s GPU Pod 里没有 Docker 时见下文。先阅读实验指南第 2 节：vLLM 0.34.0 只有 CUDA 13 构建（镜像 `vllm/vllm-openai:v0.34.0`），驱动低于 R580 时，数据中心卡（T4、H20）在 R535/R570 上要加 `CUDA_COMPAT=1`。0.33.0 起不再发布 CUDA 12.9（`-cu129`）构建；兼容模式不行又不能升级驱动时，整体回退到 `VLLM_VERSION=0.32.0`，脚本会改用 `v0.32.0-cu129` 镜像，实验数字也随之变回 0.32 的。
 
 ```bash
 git clone https://github.com/evenchen6/vllm-sglang-handbook.git
@@ -26,7 +26,7 @@ bash scripts/serve-vllm-t4.sh
 CUDA_COMPAT=1 bash scripts/serve-vllm-h20.sh
 ```
 
-已经在 GPU Pod 里、没有 Docker 时，把 Pod 镜像设成 `vllm/vllm-openai:v0.32.0`（镜像里的 `python3` 已装好 vLLM 0.32.0），再用同一组参数启动；el8 系统（glibc 2.28）上直接 pip 安装会卡在 llguidance 的源码编译，见指南第 2 节：
+已经在 GPU Pod 里、没有 Docker 时，把 Pod 镜像设成 `vllm/vllm-openai:v0.34.0`（镜像里的 `python3` 已装好 vLLM 0.34.0），再用同一组参数启动；el8 系统（glibc 2.28）上直接 pip 安装会卡在 llguidance 的源码编译，见指南第 2 节：
 
 ```bash
 RUNTIME=native bash scripts/serve-vllm-t4.sh
@@ -40,9 +40,9 @@ python3 examples/stream-bench.py --requests 1 --warmup 0 --show-output          
 python3 examples/stream-bench.py --model qwen3.8-27b-fp8 --requests 1 --warmup 0 --show-output  # H20
 ```
 
-T4 默认 `RedHatAI/Qwen3.5-9B-quantized.w4a16`、FP16 激活、4096 上下文、调度上限 1，首次关闭前缀缓存和 CUDA Graph 以缩小排障范围。H20 默认 `Qwen/Qwen3.8-27B-FP8`、BF16 激活、32768 上下文、调度上限 64，前缀缓存和 CUDA Graph 按 0.32 默认打开。客户端默认关闭思考。脚本固定模型 revision 与引擎版本（Docker 用 `v0.32.0` 镜像，原生方式检查 `vllm==0.32.0`），并让服务在 usage 里返回每条请求的 `cached_tokens`；`DRY_RUN=1` 先查看完整命令，脚本参数原样追加到引擎参数末尾。旧版手册的 vLLM 0.18.1 只作历史参照。
+T4 默认 `RedHatAI/Qwen3.5-9B-quantized.w4a16`、FP16 激活、4096 上下文、调度上限 1，首次关闭前缀缓存和 CUDA Graph 以缩小排障范围。H20 默认 `Qwen/Qwen3.8-27B-FP8`、BF16 激活、32768 上下文、调度上限 64，前缀缓存和 CUDA Graph 按 0.34 默认打开，KV 显存交给 0.34 默认的 extensible KV cache（T4 仍显式设 0.85 留余量）。客户端默认关闭思考。脚本固定模型 revision 与引擎版本（Docker 用 `v0.34.0` 镜像，原生方式检查 `vllm==0.34.0`；`VLLM_VERSION=0.32.0` 是唯一允许的回退），并让服务在 usage 里返回每条请求的 `cached_tokens`；`DRY_RUN=1` 先查看完整命令，脚本参数原样追加到引擎参数末尾。旧版手册的 vLLM 0.18.1 只作历史参照。
 
-**验证状态：** 文档对照 0.32.0 / 0.5.23 的源码、文档、官方镜像元数据与模型卡；脚本拼出的各组引擎参数用 0.32.0 自己的参数解析器校验过，三份固定 checkpoint 在无 GPU 机器上跑过 0.32.0 的配置代码（架构、量化方式、状态模式日志）。网页交互、脚本语法和 HTTP/SSE 客户端在本地验证。本项目维护环境没有 T4 或 H20，尚未完成任何一条轨道的真实 GPU 启动、质量与性能验证（Docker 与原生都是）；不提供虚构的显存峰值或 tok/s。前向兼容（`CUDA_COMPAT=1`）在 535 驱动上的整条链路也没有实测。
+**验证状态：** 文档对照 0.34.0 / 0.5.23 的源码、Release 说明、官方镜像元数据与模型卡；脚本拼出的各组引擎参数用 0.34.0 自己的参数解析器校验过，三份固定 checkpoint 在无 GPU 机器上跑过 0.34.0 的配置代码（把 CUDA 平台伪装成 SM75 / SM90；架构、状态模式日志、混合块大小）。网页交互、脚本语法和 HTTP/SSE 客户端在本地验证。本项目维护环境没有 T4 或 H20，尚未完成任何一条轨道的真实 GPU 启动、质量与性能验证（Docker 与原生都是）；不提供虚构的显存峰值或 tok/s。前向兼容（`CUDA_COMPAT=1`）在 535 驱动上的整条链路，包括 0.34 的 extensible KV cache 在 compat 驱动下的表现，也没有实测。
 
 ## 仓库内容
 
@@ -67,4 +67,4 @@ shellcheck scripts/*.sh
 git diff --check
 ```
 
-协议测试使用本机模拟 HTTP/SSE 服务；启动脚本测试用假的 `docker` / `python` / `nvidia-smi` 检查两条轨道、两种运行方式拼出的命令；缓存形状测试用替身对象。都不需要 GPU；通过这些检查不代表 GPU 内核验证通过。
+协议测试使用本机模拟 HTTP/SSE 服务；启动脚本测试用假的 `docker` / `python` / `nvidia-smi` 检查两条轨道、两种运行方式拼出的命令；缓存形状测试用替身对象；文档一致性测试检查各处写的镜像版本与脚本默认值一致、没有引用不存在的 0.33+ cu129 构建。都不需要 GPU；通过这些检查不代表 GPU 内核验证通过。

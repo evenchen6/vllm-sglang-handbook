@@ -8,9 +8,9 @@
 | --- | --- |
 | 日期、轨道（T4 / H20）、机器 / GPU | |
 | nvidia-smi 容量、驱动版本、空闲显存 | |
-| CUDA 构建（默认 CUDA 13 / `-cu129`）、`CUDA_COMPAT` 取值、检查片段里 `libcuda` 报的版本 | |
+| CUDA 构建（0.34 只有 CUDA 13；回退时 0.32.0 `-cu129`）、`CUDA_COMPAT` 取值、检查片段里 `libcuda` 报的版本 | |
 | 运行方式（Docker / 原生）；镜像标签与实际 digest，或原生的 Python 路径与 `pip freeze` | |
-| 引擎版本（vLLM 0.32.0 / SGLang 0.5.23）、Python、PyTorch、CUDA、Transformers 版本 | |
+| 引擎版本（vLLM 0.34.0，或回退的 0.32.0 / SGLang 0.5.23）、Python、PyTorch、CUDA、Transformers 版本 | |
 | checkpoint 与 revision、`PROFILE` | |
 | 量化、激活 / KV / 递推状态 dtype | |
 | 普通注意力后端（`Using … attention backend` 原文）/ T4 的 W4A16 内核（`Using …LinearKernel` 原文）/ GDN 内核 | |
@@ -18,9 +18,10 @@
 | CUDA Graph / prefix cache / 追加的引擎参数 | |
 | 服务启动（容器或原生进程）到 `/v1/models` 的墙钟时间 | |
 | 注意力块大小 N（`Setting attention block size to N tokens` 原文）与指南里的预期 N | |
-| Mamba/GDN 模式（0.32 开前缀缓存时应有 `Mamba cache mode is set to 'align' …` 一行；关掉时没有这一行，模式为 `none`） | |
+| Mamba/GDN 模式（开前缀缓存时应有 `Mamba cache mode is set to 'align' …` 一行；关掉时没有这一行，模式为 `none`）、`Using … GDN prefill kernel` 那一行（T4 预期 Triton/FLA，H20 预期 FlashInfer） | |
+| KV 显存：`MEM_UTIL` 取值（H20 默认不传）、是否关了 extensible KV cache、`Memory after warmup: …` 一行、有没有 `gpu_memory_utilization=… caps this instance` WARNING | |
 | KV 池（`GPU KV cache size: … tokens, Maximum concurrency for … tokens per request: …x` 原文） | |
-| 异步调度：`ASYNC_SCHED` 取值、`non-default args` 里有没有 `async_scheduling`（0.32 不再打印 `Asynchronous scheduling is …`） | |
+| 异步调度：`ASYNC_SCHED` 取值、`non-default args` 里有没有 `async_scheduling`（0.32 起不再打印 `Asynchronous scheduling is …`） | |
 | thinking、采样、输入长度与输出上限 | |
 | 客户端并发 / 是否本机、SSH 隧道或 port-forward | |
 | 完整启动命令（`DRY_RUN=1` 输出）与客户端命令 | |
@@ -36,7 +37,7 @@
 | TPOT 口径 / chunk 间隔口径 | |
 | 输出 token/s 与请求/s | |
 | 显存峰值 / 服务器 preemption | |
-| 每条请求的 `cached_tokens` 序列、`cache_hit_requests`；与预期（T4 528、H20 784 或 FP8 KV 时 1568 的整数倍）是否一致 | |
+| 每条请求的 `cached_tokens` 序列、`cache_hit_requests`；与预期（0.34：T4 576、H20 832 或 FP8 KV 时 1600 的整数倍；回退 0.32 时是 528 / 784 / 1568）是否一致 | |
 | prefix cache queries 与 hits（`/metrics` 上的原字段名，例如 `vllm:prefix_cache_hits_total`） | |
 | SGLang 对照：`max_total_num_tokens=… max_running_requests=…` 那一行、`--mamba-full-memory-ratio` / `--max-mamba-cache-size` 取值 | |
 | 原始 JSON、日志位置 | |
