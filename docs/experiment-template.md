@@ -19,7 +19,7 @@
 | 服务启动（容器或原生进程）到 `/v1/models` 的墙钟时间 | |
 | 注意力块大小 N（`Setting attention block size to N tokens` 原文）与指南里的预期 N | |
 | Mamba/GDN 模式（开前缀缓存时应有 `Mamba cache mode is set to 'align' …` 一行；关掉时没有这一行，模式为 `none`）、`Using … GDN prefill kernel` 那一行（T4 预期 Triton/FLA，H20 预期 FlashInfer） | |
-| KV 显存：`MEM_UTIL` 取值（H20 默认不传）、是否关了 extensible KV cache、`Memory after warmup: …` 一行、有没有 `gpu_memory_utilization=… caps this instance` WARNING | |
+| KV 显存：`MEM_UTIL` 取值（0.34 的 H20 默认不传，回退 0.32 时是 0.90）、是否手动关了 extensible KV cache、有没有 `Disabling the extensible KV cache: …` WARNING（有就抄冒号后的原因）、`Memory after warmup: …` 一行、有没有 `gpu_memory_utilization=… caps this instance` WARNING | |
 | KV 池（`GPU KV cache size: … tokens, Maximum concurrency for … tokens per request: …x` 原文） | |
 | 异步调度：`ASYNC_SCHED` 取值、`non-default args` 里有没有 `async_scheduling`（0.32 起不再打印 `Asynchronous scheduling is …`） | |
 | thinking、采样、输入长度与输出上限 | |
@@ -37,7 +37,7 @@
 | TPOT 口径 / chunk 间隔口径 | |
 | 输出 token/s 与请求/s | |
 | 显存峰值 / 服务器 preemption | |
-| 每条请求的 `cached_tokens` 序列、`cache_hit_requests`；与预期（0.34：T4 576、H20 832 或 FP8 KV 时 1600 的整数倍；回退 0.32 时是 528 / 784 / 1568）是否一致 | |
+| 每条请求的 `cached_tokens` 序列、`cache_hit_requests`；与预期是否一致（0.34、默认 32 行：T4 每条 576、H20 每条 832；`KV_DTYPE=fp8` 加 `--prefix-lines 64` 时 1600；回退 0.32 时对应 528 / 784 / 1568；改了提示词时应是 N 的整数倍） | |
 | prefix cache queries 与 hits（`/metrics` 上的原字段名，例如 `vllm:prefix_cache_hits_total`） | |
 | SGLang 对照：`max_total_num_tokens=… max_running_requests=…` 那一行、`--mamba-full-memory-ratio` / `--max-mamba-cache-size` 取值 | |
 | 原始 JSON、日志位置 | |
